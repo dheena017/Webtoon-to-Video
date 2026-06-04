@@ -1,0 +1,6 @@
+{
+  "name": "Webtoon-to-Video Backend",
+  "description": "A modular Python FastAPI backend service that scrapes Webtoon images, extracts panel structures and text using Vision AI placeholders, and renders high-quality cinematic MP4 compilations using MoviePy.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
