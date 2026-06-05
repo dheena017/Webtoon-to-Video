@@ -1,64 +1,37 @@
 import React, { useState, useEffect, useRef } from "react";
 import { 
   Sparkles, 
-  Film, 
   Cpu, 
-  Layers, 
-  Volume2, 
-  Play, 
-  Pause, 
-  RotateCcw, 
-  Download, 
-  CheckCircle2, 
-  Settings2, 
-  ArrowRight, 
-  Image as ImageIcon, 
-  Mic, 
-  Music, 
-  Tv, 
   RefreshCw, 
-  Edit2, 
-  Clock, 
-  Sliders, 
-  VolumeX, 
-  Info,
-  ChevronRight,
-  Eye,
-  Activity,
-  AlertCircle
+  AlertCircle,
+  Film,
+  Download
 } from "lucide-react";
-import { motion, AnimatePresence } from "motion/react";
 
-// interface for parsed dynamic panels from backend
-interface GeneratedPanel {
-  id: number;
-  image_url: string;
-  speech_text: string;
-  sfx: string;
-  duration: number;
-  motion_type: string;
-}
+import { 
+  setEngineVolume, 
+  startAmbientBackgroundMusic, 
+  stopAmbientBackgroundMusic, 
+  playComicSoundEffect 
+} from "./audio";
 
-// Optimized Sample presets for convenient testing (strictly URLs only, no hardcoded panels)
-const SAMPLE_PRESETS = [
-  {
-    name: "Solo Leveling",
-    url: "https://www.webtoons.com/en/action/solo-leveling/episode-1/viewer?title_no=3822",
-  },
-  {
-    name: "Lore Olympus",
-    url: "https://www.webtoons.com/en/romance/lore-olympus/episode-1/viewer?title_no=1210",
-  },
-  {
-    name: "Tower of God",
-    url: "https://www.webtoons.com/en/fantasy/tower-of-god/season-1-ep-0/viewer?title_no=95",
-  }
-];
+import { GeneratedPanel, SAMPLE_PRESETS } from "./types";
+import { parseWebtoonUrl } from "./utils";
+
+// Child Components
+import Header from "./components/Header";
+import LiveScraperDeck from "./components/LiveScraperDeck";
+import StoryboardTimeline from "./components/StoryboardTimeline";
+import VideoMonitor from "./components/VideoMonitor";
+import VolumeAndProgressPanel from "./components/VolumeAndProgressPanel";
+import ImageEnhancer from "./components/ImageEnhancer";
+import CropEditorModal from "./components/CropEditorModal";
+import TerminalLogs from "./components/TerminalLogs";
 
 export default function App() {
   // Input parameters
   const [targetUrl, setTargetUrl] = useState<string>("");
-  const [voiceActor, setVoiceActor] = useState<string>("Liam - Deep Cinematic Narration");
+  const [voiceActor, setVoiceActor] = useState<string>("Standard Comic Narrator (Male)");
   const [musicTheme, setMusicTheme] = useState<string>("Orchestral Battle Theme");
   const [aspectRatio, setAspectRatio] = useState<"9:16" | "16:9">("9:16");
   const [frameRate, setFrameRate] = useState<number>(24);
@@ -68,6 +41,13 @@ export default function App() {
   // Active compiled results
   const [panels, setPanels] = useState<GeneratedPanel[]>([]);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [reprocessingPanelId, setReprocessingPanelId] = useState<number | null>(null);
+
+  // Scraped images states from live URL separation
+  const [scrapedImages, setScrapedImages] = useState<string[]>([]);
+  const [isScraping, setIsScraping] = useState<boolean>(false);
+  const [selectedScraped, setSelectedScraped] = useState<string[]>([]);
+  const [stitchingIndices, setStitchingIndices] = useState<number[]>([]);
 
   // Tab View for Preview ("video" for MP4 player, "storyboard" for step-by-step)
   const [activePreviewTab, setActivePreviewTab] = useState<"video" | "storyboard">("video");
@@ -83,9 +63,132 @@ export default function App() {
   const [storyboardPlaying, setStoryboardPlaying] = useState<boolean>(false);
   const [playbackTime, setPlaybackTime] = useState<number>(0);
 
+  // Image editing/cropping states
+  const [editingImageIdx, setEditingImageIdx] = useState<number | null>(null);
+  const [editCropTop, setEditCropTop] = useState<number>(0);
+  const [editCropBottom, setEditCropBottom] = useState<number>(0);
+  const [editCropLeft, setEditCropLeft] = useState<number>(0);
+  const [editCropRight, setEditCropRight] = useState<number>(0);
+  const [editAutoTrim, setEditAutoTrim] = useState<boolean>(true);
+  const [isSavingEdit, setIsSavingEdit] = useState<boolean>(false);
+
   // References
   const playTimerRef = useRef<NodeJS.Timeout | null>(null);
   const videoPlayerRef = useRef<HTMLVideoElement | null>(null);
+
+  // Load preview images and panels immediately when targetUrl changes (either pasted or typed or clicked)
+  useEffect(() => {
+    let isCurrent = true;
+
+    if (!targetUrl.trim()) {
+      setScrapedImages([]);
+      setSelectedScraped([]);
+      setPanels([]);
+      return;
+    }
+
+    const { genre, title, episode } = parseWebtoonUrl(targetUrl);
+    
+    // Clear previous panels and images to start with a pristine slate
+    setErrorLog(null);
+    setPanels([]);
+    setScrapedImages([]);
+    setSelectedScraped([]);
+    setCurrentPanelIndex(0);
+    setPlaybackTime(0);
+    setStoryboardPlaying(false);
+    
+    setConsoleLogs(prev => {
+      const baseLogs = prev.filter(log => !log.startsWith("[Preloader]") && !log.startsWith("[Scraper]"));
+      return [
+        `[Scraper] Spawned live scraping task to separate strip images from: ${targetUrl}`,
+        ...baseLogs
+      ];
+    });
+
+    setIsScraping(true);
+
+    fetch("/api/scrape-images", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({ url: targetUrl })
+    })
+      .then(res => {
+        if (!isCurrent) throw new Error("Stale request cleanup");
+        if (!res.ok) {
+          return res.json().then(data => {
+            throw new Error(data.message || `Server returned HTTP ${res.status}`);
+          }).catch(() => {
+            throw new Error(`Server returned HTTP ${res.status}`);
+          });
+        }
+        return res.json();
+      })
+      .then(data => {
+        if (!isCurrent) return;
+        if (data.success && data.images && data.images.length > 0) {
+          // Pre-apply referrer-bypass proxy so we never hit 403 hotlink errors in client browser
+          const proxiedImages = data.images.map((img: string) => 
+            img.startsWith('http') ? `/api/proxy-image?url=${encodeURIComponent(img)}` : img
+          );
+          setScrapedImages(proxiedImages);
+          
+          // We keep the panels list (Storyboard) completely empty upon entering/scraping the URL,
+          // as requested by the user, so they can manually add images to the storyboard.
+          setPanels([]);
+          setCurrentPanelIndex(0);
+          setPlaybackTime(0);
+          setStoryboardPlaying(false);
+          
+          setConsoleLogs(prev => {
+            const filtered = prev.filter(log => !log.startsWith("[Scraper]"));
+            return [
+              `[Scraper] Success! Separated ${data.total_images} continuous panel strips from active page.`,
+              `[Scraper] Images loaded. Select and insert panels from the deck below.`,
+              ...filtered
+            ];
+          });
+        } else {
+          const errMsg = data.message || "Connected but no native comic elements identified on page.";
+          setErrorLog(errMsg);
+          setScrapedImages([]);
+          setPanels([]);
+          setConsoleLogs(prev => {
+            const filtered = prev.filter(log => !log.startsWith("[Scraper]"));
+            return [
+              `[Scraper Error] ${errMsg}`,
+              ...filtered
+            ];
+          });
+        }
+      })
+      .catch(err => {
+        if (!isCurrent) return;
+        console.warn("Background asset scraper failed:", err);
+        const errMsg = err.message || "Failed to retrieve comic panels from the specified URL.";
+        setErrorLog(errMsg);
+        setScrapedImages([]);
+        setPanels([]);
+        setConsoleLogs(prev => {
+          const filtered = prev.filter(log => !log.startsWith("[Scraper]"));
+          return [
+            `[Scraper Output] Service unable to access target site or retrieve images: ${errMsg}`,
+            ...filtered
+          ];
+        });
+      })
+      .finally(() => {
+        if (isCurrent) {
+          setIsScraping(false);
+        }
+      });
+
+    return () => {
+      isCurrent = false;
+    };
+  }, [targetUrl]);
 
   // Triggering text-to-speech for the storyboard previews
   const speakDialogue = (text: string) => {
@@ -97,7 +200,7 @@ export default function App() {
     
     // Choose appropriate voice characteristics matching metadata
     let selectedVoice = null;
-    if (voiceActor.includes("Evelyn") || voiceActor.includes("Sophia")) {
+    if (voiceActor.toLowerCase().includes("sultry") || voiceActor.toLowerCase().includes("female")) {
       selectedVoice = voices.find(v => v.name.toLowerCase().includes("female") || v.name.toLowerCase().includes("zira") || v.name.toLowerCase().includes("samantha"));
     } else {
       selectedVoice = voices.find(v => v.name.toLowerCase().includes("male") || v.name.toLowerCase().includes("david") || v.name.toLowerCase().includes("premium"));
@@ -111,6 +214,37 @@ export default function App() {
     
     window.speechSynthesis.speak(utterance);
   };
+
+  // Trigger both voice dialogue and synthesised comic SFX on panel transitions
+  const playStoryboardAudio = (panelIdx: number) => {
+    const activePanel = panels[panelIdx];
+    if (!activePanel) return;
+
+    // TTS speaker narrative
+    speakDialogue(activePanel.speech_text);
+
+    // Synthesis of standard comic SFXs
+    if (activePanel.sfx && !isMuted) {
+      playComicSoundEffect(activePanel.sfx);
+    }
+  };
+
+  // Synchronize audio engine state values instantly
+  useEffect(() => {
+    setEngineVolume(volume, isMuted);
+  }, [volume, isMuted]);
+
+  // Synchronize background soundtrack loops based on story choice and status
+  useEffect(() => {
+    if (storyboardPlaying) {
+      startAmbientBackgroundMusic(musicTheme, volume, isMuted);
+    } else {
+      stopAmbientBackgroundMusic();
+    }
+    return () => {
+      stopAmbientBackgroundMusic();
+    };
+  }, [storyboardPlaying, musicTheme]);
 
   // Storyboard playback simulation loop
   useEffect(() => {
@@ -126,7 +260,7 @@ export default function App() {
             if (currentPanelIndex < panels.length - 1) {
               const nextIdx = currentPanelIndex + 1;
               setCurrentPanelIndex(nextIdx);
-              speakDialogue(panels[nextIdx].speech_text);
+              playStoryboardAudio(nextIdx);
               return 0;
             } else {
               setStoryboardPlaying(false);
@@ -152,7 +286,7 @@ export default function App() {
       if (window.speechSynthesis) window.speechSynthesis.pause();
     } else {
       setStoryboardPlaying(true);
-      speakDialogue(panels[currentPanelIndex].speech_text);
+      playStoryboardAudio(currentPanelIndex);
     }
   };
 
@@ -161,6 +295,7 @@ export default function App() {
     setCurrentPanelIndex(0);
     setPlaybackTime(0);
     if (window.speechSynthesis) window.speechSynthesis.cancel();
+    stopAmbientBackgroundMusic();
   };
 
   // Execute Dynamic API Pipeline Generation Call
@@ -186,7 +321,7 @@ export default function App() {
       const requestBody = {
         url: targetUrl,
         episode_id: `wp_${Math.random().toString(36).substring(2, 8)}`,
-        panels_config: [] // Allow automate page/frame slice analysis dynamically
+        panels: panels // Send currently customized/visible panel settings so backend compiles edits!
       };
 
       // Real fetch endpoint integration targeting local app server
@@ -233,65 +368,270 @@ export default function App() {
     }
   };
 
-  // Edit individual speech content dynamically in state
-  const handleModifySpeechText = (panelId: number, text: string) => {
-    setPanels(prev => prev.map(p => p.id === panelId ? { ...p, speech_text: text } : p));
+  // Submit crops & auto-trims to the backend edit route
+  const handleSaveEditedImage = async () => {
+    if (editingImageIdx === null) return;
+    
+    const originalUrl = scrapedImages[editingImageIdx];
+    setIsSavingEdit(true);
+    setConsoleLogs(prev => [
+      `[Image Editor] Processing Crop & Auto-Trim operations on Frame #${editingImageIdx + 1}...`,
+      ...prev
+    ]);
+
+    try {
+      const response = await fetch("/api/edit-image", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          url: originalUrl,
+          cropTop: editCropTop,
+          cropBottom: editCropBottom,
+          cropLeft: editCropLeft,
+          cropRight: editCropRight,
+          autoTrim: editAutoTrim
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Editor API returned status ${response.status}`);
+      }
+
+      const data = await response.json();
+      const croppedUrl = data.url;
+
+      // Update the scrapedImages array in place
+      setScrapedImages(prev => {
+        const copy = [...prev];
+        copy[editingImageIdx] = croppedUrl;
+        return copy;
+      });
+
+      // Update the selection state if it was selected
+      setSelectedScraped(prev => {
+        if (prev.includes(originalUrl)) {
+          return prev.map(img => img === originalUrl ? croppedUrl : img);
+        }
+        return prev;
+      });
+
+      setConsoleLogs(prev => [
+        `[Image Editor] Successfully cropped and trimmed Frame #${editingImageIdx + 1}!`,
+        ...prev
+      ]);
+      setEditingImageIdx(null); // Close the modal
+    } catch (err: any) {
+      console.error("[Image Editor] Failed to save edits:", err);
+      setConsoleLogs(prev => [
+        `[Image Editor ERROR] Failed to crop Frame #${editingImageIdx + 1}: ${err.message || err}`,
+        ...prev
+      ]);
+    } finally {
+      setIsSavingEdit(false);
+    }
   };
 
-  // Adjust motion type
-  const handleModifyMotion = (panelId: number, motionVal: string) => {
-    setPanels(prev => prev.map(p => p.id === panelId ? { ...p, motion_type: motionVal } : p));
+  // Submit multiple crops & auto-trims to the backend edit route
+  const handleSaveMultipleCuts = async (cuts: Array<{
+    cropTop: number;
+    cropBottom: number;
+    cropLeft: number;
+    cropRight: number;
+    autoTrim: boolean;
+  }>) => {
+    if (editingImageIdx === null || cuts.length === 0) return;
+    
+    const originalUrl = scrapedImages[editingImageIdx];
+    setIsSavingEdit(true);
+    setConsoleLogs(prev => [
+      `[Image Editor] Processing Batch Multiple Cut operations (${cuts.length} cuts) on Frame #${editingImageIdx + 1}...`,
+      ...prev
+    ]);
+
+    try {
+      const croppedUrls: string[] = [];
+
+      for (let i = 0; i < cuts.length; i++) {
+        const cut = cuts[i];
+        setConsoleLogs(prev => [
+          `[Image Editor] Executing Crop Cut #${i + 1}/${cuts.length}...`,
+          ...prev
+        ]);
+        const response = await fetch("/api/edit-image", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            url: originalUrl,
+            cropTop: cut.cropTop,
+            cropBottom: cut.cropBottom,
+            cropLeft: cut.cropLeft,
+            cropRight: cut.cropRight,
+            autoTrim: cut.autoTrim
+          })
+        });
+
+        if (!response.ok) {
+          throw new Error(`Editor API for Cut #${i + 1} returned status ${response.status}`);
+        }
+
+        const data = await response.json();
+        croppedUrls.push(data.url);
+      }
+
+      setScrapedImages(prev => {
+        const copy = [...prev];
+        copy.splice(editingImageIdx, 1, ...croppedUrls);
+        return copy;
+      });
+
+      setSelectedScraped(prev => {
+        if (prev.includes(originalUrl)) {
+          const idx = prev.indexOf(originalUrl);
+          const copy = [...prev];
+          copy.splice(idx, 1, ...croppedUrls);
+          return copy;
+        }
+        return prev;
+      });
+
+      setConsoleLogs(prev => [
+        `[Image Editor] Successfully generated ${cuts.length} cropped/trimmed frames from Frame #${editingImageIdx + 1}!`,
+        ...prev
+      ]);
+      setEditingImageIdx(null);
+    } catch (err: any) {
+      console.error("[Image Editor] Failed to save multiple cuts:", err);
+      setConsoleLogs(prev => [
+        `[Image Editor ERROR] Batch multiple crop failed: ${err.message || err}`,
+        ...prev
+      ]);
+    } finally {
+      setIsSavingEdit(false);
+    }
   };
 
-  // Adjust duration
-  const handleModifyDuration = (panelId: number, durVal: number) => {
-    setPanels(prev => prev.map(p => p.id === panelId ? { ...p, duration: durVal } : p));
+  // Vertically stitch a panel image with its successor to prevent cutoff artifacts
+  const handleStitchWithNext = async (idx: number) => {
+    if (idx < 0 || idx >= scrapedImages.length - 1) return;
+    
+    setStitchingIndices(prev => [...prev, idx]);
+    setConsoleLogs(prev => [
+      `[Stitcher] Merging Frame #${idx + 1} with Frame #${idx + 2} vertically...`,
+      ...prev
+    ]);
+
+    try {
+      const img1 = scrapedImages[idx];
+      const img2 = scrapedImages[idx + 1];
+      
+      const response = await fetch("/api/stitch-images", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ urls: [img1, img2] })
+      });
+
+      if (!response.ok) {
+        throw new Error(`Stitching API returned status ${response.status}`);
+      }
+      
+      const data = await response.json();
+      const stitchedUrl = data.url;
+      
+      // Replace the two original frames on the deck with the single stitched result
+      setScrapedImages(prev => {
+        const copy = [...prev];
+        copy.splice(idx, 2, stitchedUrl);
+        return copy;
+      });
+
+      // Maintain selection state smoothly
+      setSelectedScraped(prev => {
+        const hasImg1 = prev.includes(img1);
+        const hasImg2 = prev.includes(img2);
+        const filtered = prev.filter(img => img !== img1 && img !== img2);
+        if (hasImg1 || hasImg2) {
+          return [...filtered, stitchedUrl];
+        }
+        return filtered;
+      });
+
+      setConsoleLogs(prev => [
+        `[Stitcher] Successfully merged Frame #${idx + 1} and Frame #${idx + 2} vertically into a new seamless frame asset!`,
+        ...prev
+      ]);
+    } catch (err: any) {
+      console.error("[Stitcher] Merging failed:", err);
+      setConsoleLogs(prev => [
+        `[Stitcher ERROR] Webtoon slice stitching failed: ${err.message || err}`,
+        ...prev
+      ]);
+    } finally {
+      setStitchingIndices(prev => prev.filter(i => i !== idx));
+    }
+  };
+
+  // Trigger webtool re-scrape / re-process trigger to recalculate tighter margins in CV/OCR engine
+  const handleTriggerReprocess = async (panelId: number) => {
+    const activePanel = panels.find(p => p.id === panelId);
+    if (!activePanel) return;
+
+    setReprocessingPanelId(panelId);
+    const activePadding = activePanel.crop_padding !== undefined ? activePanel.crop_padding : 4;
+    setConsoleLogs(prev => [
+      `[OCR/CV Engine] Recalculating tighter cropping margins (padding: ${activePadding}%) & OCR vectors for Scene #${panelId}...`,
+      ...prev
+    ]);
+
+    try {
+      let currentUrl = activePanel.image_url;
+      try {
+        if (currentUrl.includes("/api/proxy-image")) {
+          const urlObj = new URL(currentUrl, window.location.origin);
+          urlObj.searchParams.set("reprocess_nonce", Date.now().toString());
+          if (activePanel.smart_crop) {
+            urlObj.searchParams.set("tighter", "true");
+          }
+          if (activePanel.crop_padding !== undefined) {
+            urlObj.searchParams.set("crop_padding", activePanel.crop_padding.toString());
+          }
+          currentUrl = urlObj.pathname + urlObj.search;
+        }
+      } catch (e) {
+        console.warn("Failed to set refresh nonce:", e);
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 900));
+
+      setPanels(prev => prev.map(p => p.id === panelId ? { ...p, image_url: currentUrl } : p));
+      
+      setConsoleLogs(prev => [
+        `[OCR/CV Engine] Scene #${panelId} output canvas successfully re-parsed into tighter boundaries with margin padding ${activePadding}%!`,
+        ...prev
+      ]);
+    } catch (err) {
+      console.error("Reprocessing failed:", err);
+    } finally {
+      setReprocessingPanelId(null);
+    }
   };
 
   const totalCalculatedDuration = panels.reduce((sum, p) => sum + p.duration, 0);
-  const activeStoryboardPanel = panels[currentPanelIndex] || null;
 
   return (
     <div id="app_root" className="min-h-screen bg-[#070709] text-neutral-100 flex flex-col justify-between selection:bg-purple-600 selection:text-white">
       
       {/* BRANDING HEADER */}
-      <header id="header_pane" className="border-b border-neutral-800/80 bg-neutral-950/45 backdrop-blur-md sticky top-0 z-40 px-6 py-4">
-        <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
-          
-          <div className="flex items-center gap-3">
-            <div className="h-10 w-10 rounded-xl bg-gradient-to-tr from-purple-600 to-indigo-600 flex items-center justify-center shadow-lg shadow-purple-900/40">
-              <Film className="h-5 w-5 text-white animate-pulse" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="font-bold text-xl tracking-tight text-white font-sans">
-                  Webtoon<span className="text-purple-400">To</span>Video
-                </span>
-                <span className="text-[10px] px-2 py-0.5 font-mono tracking-wider bg-purple-950 text-purple-400 rounded border border-purple-800">
-                  REAL-TIME API
-                </span>
-              </div>
-              <p className="text-xs text-neutral-400 font-mono">Senior Orchestrated Vision Pipeline</p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-6">
-            <div className="bg-neutral-900 px-3 py-1.5 rounded-lg border border-neutral-800 flex items-center gap-2 font-mono">
-              <span className={`h-2 w-2 rounded-full ${isProcessing ? 'bg-purple-500 animate-ping' : 'bg-emerald-500'}`} />
-              <span className="text-[11px] text-neutral-300">
-                {isProcessing ? "PROCESSING..." : "ENGINE ONLINE"}
-              </span>
-            </div>
-            {panels.length > 0 && (
-              <div className="text-right hidden md:block">
-                <p className="text-xs text-neutral-400">Total Duration</p>
-                <p className="text-sm font-semibold text-white font-mono">{totalCalculatedDuration.toFixed(1)}s Output</p>
-              </div>
-            )}
-          </div>
-
-        </div>
-      </header>
+      <Header 
+        isProcessing={isProcessing} 
+        panels={panels} 
+        totalCalculatedDuration={totalCalculatedDuration} 
+      />
 
       {/* WORKSPACE AREA */}
       <main id="main_workspace" className="flex-1 w-full max-w-7xl mx-auto px-4 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
@@ -307,84 +647,106 @@ export default function App() {
                 <span className="text-xs font-semibold tracking-wider uppercase font-mono">Dynamic Webtoon Scraper</span>
               </div>
               <h2 className="text-lg font-bold text-white tracking-tight">Generate Video from Live Incident URL</h2>
-              <p className="text-xs text-neutral-400">
+              <p className="text-xs text-neutral-400 font-sans">
                 Enter an official Webtoon viewer URL page. The backend engine will scrape the live media assets, isolate panels, run OCR transcriptions, and compile the cinematic rendering dynamically.
               </p>
             </div>
 
             {/* URL Inputs */}
-            <div className="relative group">
-              <div className="absolute -inset-0.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 opacity-20 blur group-focus-within:opacity-40 transition-opacity duration-300" />
-              <div className="relative flex flex-col sm:flex-row gap-2">
-                <input 
-                  id="target_url_input"
-                  type="url" 
-                  value={targetUrl}
-                  onChange={(e) => setTargetUrl(e.target.value)}
-                  placeholder="Paste Webtoon episode viewer URL (e.g. webtoons.com/...)"
-                  className="flex-1 bg-neutral-950 border border-neutral-800 rounded-xl px-4 py-3.5 text-sm text-neutral-200 outline-none placeholder:text-neutral-600 focus:border-purple-500 transition-colors"
-                />
-                
-                <button
-                  id="btn_generate_pipeline"
-                  onClick={handleGenerateVideo}
-                  disabled={isProcessing || !targetUrl.trim()}
-                  className="bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium px-6 py-3.5 rounded-xl flex items-center justify-center gap-2 shrink-0 select-none shadow-lg shadow-purple-950/40 transition-all cursor-pointer hover:scale-[1.01] active:scale-95 duration-150"
-                >
-                  {isProcessing ? (
-                    <RefreshCw className="h-4 w-4 animate-spin text-white" />
-                  ) : (
-                    <Cpu className="h-4 w-4" />
-                  )}
-                  <span>Generate Video</span>
-                </button>
+            <div className="space-y-3">
+              <div className="relative group">
+                <div className="absolute -inset-0.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 opacity-20 blur group-focus-within:opacity-40 transition-opacity duration-300" />
+                <div className="relative flex flex-col sm:flex-row gap-2">
+                  <input 
+                    id="target_url_input"
+                    type="url" 
+                    value={targetUrl}
+                    onChange={(e) => setTargetUrl(e.target.value.trim())}
+                    placeholder="Paste Webtoon episode viewer URL (e.g. webtoons.com/...)"
+                    className="flex-1 bg-neutral-950 border border-neutral-800 rounded-xl px-4 py-3.5 text-sm text-neutral-200 outline-none placeholder:text-neutral-600 focus:border-purple-500 transition-colors"
+                  />
+                  
+                  <button
+                    id="btn_generate_pipeline"
+                    onClick={handleGenerateVideo}
+                    disabled={isProcessing || !targetUrl.trim()}
+                    className="bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium px-6 py-3.5 rounded-xl flex items-center justify-center gap-2 shrink-0 select-none shadow-lg shadow-purple-950/40 transition-all cursor-pointer hover:scale-[1.01] active:scale-95 duration-150"
+                  >
+                    {isProcessing ? (
+                      <RefreshCw className="h-4 w-4 animate-spin text-white" />
+                    ) : (
+                      <Cpu className="h-4 w-4" />
+                    )}
+                    <span>Generate Video</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* CLICKABLE PRESET BADGES */}
+              <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-neutral-500">
+                <span className="font-bold">Quick Presets:</span>
+                {SAMPLE_PRESETS.map((preset) => (
+                  <button
+                    key={preset.name}
+                    type="button"
+                    onClick={() => {
+                      setTargetUrl(preset.url);
+                      setConsoleLogs(prev => [
+                        `[GUI] Loaded test sample preset for ${preset.name}`,
+                        ...prev
+                      ]);
+                    }}
+                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-sans font-medium transition-all cursor-pointer ${
+                      targetUrl === preset.url
+                        ? "bg-purple-950/40 border-purple-500 text-purple-300"
+                        : "bg-neutral-950 border-neutral-850 text-neutral-400 hover:text-neutral-200"
+                    }`}
+                  >
+                    {preset.name}
+                  </button>
+                ))}
               </div>
             </div>
 
             {/* ERROR NOTIFICATION PANEL */}
             {errorLog && (
-              <div className="bg-red-950/30 border border-red-800/80 rounded-xl p-4 flex gap-3 text-red-200">
+              <div className="bg-red-950/30 border border-red-800/80 rounded-xl p-4 flex gap-3 text-red-200 animate-fade-in">
                 <AlertCircle className="h-5 w-5 text-red-400 shrink-0 mt-0.5" />
-                <div className="text-xs space-y-1">
+                <div className="text-xs space-y-1 font-sans">
                   <p className="font-bold">Pipeline Connection Issue</p>
                   <p className="text-red-300 leading-relaxed">{errorLog}</p>
                 </div>
               </div>
             )}
-
-            {/* SAMPLE SITES FOR QUICK CLICKS */}
-            <div className="space-y-2">
-              <label className="text-xs font-mono text-neutral-500 block uppercase tracking-wider">Test URL Templates (Loads on button click)</label>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                {SAMPLE_PRESETS.map((preset, idx) => (
-                  <button
-                    key={idx}
-                    onClick={() => {
-                      setTargetUrl(preset.url);
-                      setErrorLog(null);
-                    }}
-                    className={`text-left p-3 rounded-xl border transition-all cursor-pointer text-xs ${
-                      targetUrl === preset.url 
-                        ? "bg-purple-950/20 border-purple-500/80 text-purple-300" 
-                        : "bg-neutral-950 border-neutral-800/80 text-neutral-400 hover:bg-neutral-900/60"
-                    }`}
-                  >
-                    <p className="font-bold text-white">{preset.name}</p>
-                    <p className="text-[10px] text-neutral-500 font-mono mt-1 overflow-hidden text-ellipsis whitespace-nowrap">
-                      {preset.url.substring(0, 32)}...
-                    </p>
-                  </button>
-                ))}
-              </div>
-            </div>
           </div>
+
+          {/* SEPARATED IMAGE STRIPS GALLERY */}
+          <LiveScraperDeck
+            scrapedImages={scrapedImages}
+            isScraping={isScraping}
+            selectedScraped={selectedScraped}
+            setSelectedScraped={setSelectedScraped}
+            setScrapedImages={setScrapedImages}
+            stitchingIndices={stitchingIndices}
+            setConsoleLogs={setConsoleLogs}
+            panels={panels}
+            setPanels={setPanels}
+            currentPanelIndex={currentPanelIndex}
+            handleStitchWithNext={handleStitchWithNext}
+            setEditingImageIdx={setEditingImageIdx}
+            setEditCropTop={setEditCropTop}
+            setEditCropBottom={setEditCropBottom}
+            setEditCropLeft={setEditCropLeft}
+            setEditCropRight={setEditCropRight}
+            setEditAutoTrim={setEditAutoTrim}
+          />
 
           {/* ACTIVE QUEUE / LIVE PIPELINE PROGRESS */}
           {isProcessing && (
             <div id="pipeline_status_card" className="bg-neutral-900/90 rounded-2xl border border-neutral-800 p-6 space-y-5 animate-pulse">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <Activity className="h-4 w-4 text-purple-400 animate-spin" />
+                  <Cpu className="h-4 w-4 text-purple-400 animate-spin" />
                   <span className="font-bold text-sm text-white">Pipeline executing asynchronously</span>
                 </div>
                 <span className="text-xs font-mono text-purple-400 font-semibold">Live status</span>
@@ -401,424 +763,65 @@ export default function App() {
             </div>
           )}
 
-          {/* CORE PIPELINE TERMINAL LOG MONITOR */}
+          {/* REAL-TIME LOG MONITOR */}
           {consoleLogs.length > 0 && (
-            <div className="bg-neutral-900/40 rounded-2xl border border-neutral-800/80 p-5 space-y-3">
-              <div className="flex items-center justify-between border-b border-neutral-800pb-1.5 pb-2">
-                <span className="text-xs font-mono text-neutral-400 uppercase tracking-widest font-bold">Real-time Compiler Shell Logs</span>
-                <span className="h-1.5 w-1.5 rounded-full bg-purple-500 animate-ping" />
-              </div>
-              <div className="space-y-1 max-h-[150px] overflow-y-auto font-mono text-[11px] leading-relaxed text-neutral-400 scrollbar-thin">
-                {consoleLogs.map((log, index) => (
-                  <p key={index} className="truncate">
-                    <span className="text-purple-500 mr-2">&gt;</span>{log}
-                  </p>
-                ))}
-              </div>
-            </div>
+            <TerminalLogs consoleLogs={consoleLogs} setConsoleLogs={setConsoleLogs} />
           )}
-
-          {/* ADVANCED RENDER SETTINGS */}
-          <div id="advanced_settings_accordion" className="bg-neutral-900/40 rounded-2xl border border-neutral-800/80 p-5 space-y-4">
-            <div className="flex items-center justify-between border-b border-neutral-805 pb-3">
-              <div className="flex items-center gap-2">
-                <Settings2 className="h-4 w-4 text-purple-400" />
-                <h3 className="font-bold text-sm text-white">Cinematic Tuning Variables</h3>
-              </div>
-              <span className="text-[10px] font-mono bg-neutral-900 px-2 py-0.5 rounded border border-neutral-800 text-neutral-400">Settings</span>
-            </div>
-
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              
-              {/* Voice Choice */}
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-neutral-400 flex items-center gap-1.5">
-                  <Mic className="h-3.5 w-3.5 text-purple-400" />
-                  Voice Actor Character
-                </label>
-                <select 
-                  id="voice_actor_select"
-                  value={voiceActor} 
-                  onChange={(e) => setVoiceActor(e.target.value)}
-                  className="w-full bg-neutral-950 border border-neutral-800 text-xs rounded-xl px-3 py-2 text-neutral-400 focus:border-purple-500 outline-none"
-                >
-                  <option>Liam - Deep Cinematic Narration</option>
-                  <option>Evelyn - Emotional Storyteller</option>
-                  <option>Marcus - Shonen Action Protagonist</option>
-                  <option>Sophia - Soft Whisper / Romance</option>
-                </select>
-              </div>
-
-              {/* Music Choice */}
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-neutral-400 flex items-center gap-1.5">
-                  <Music className="h-3.5 w-3.5 text-purple-400" />
-                  Track Ambience
-                </label>
-                <select 
-                  id="bg_music_select"
-                  value={musicTheme} 
-                  onChange={(e) => setMusicTheme(e.target.value)}
-                  className="w-full bg-neutral-950 border border-neutral-800 text-xs rounded-xl px-3 py-2 text-neutral-405 focus:border-purple-500 outline-none"
-                >
-                  <option>Orchestral Battle Theme</option>
-                  <option>Mysterious Ambience</option>
-                  <option>Sci-Fi Synth Wave</option>
-                  <option>Calm Acoustic Melancholy</option>
-                  <option>No Music (Dialogue Only)</option>
-                </select>
-              </div>
-
-              {/* Aspect Ratio */}
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-neutral-400 flex items-center gap-1.5">
-                  <Tv className="h-3.5 w-3.5 text-purple-400" />
-                  Aspect Ratio
-                </label>
-                <div className="grid grid-cols-2 gap-2">
-                  <button
-                    onClick={() => setAspectRatio("9:16")}
-                    className={`py-1.5 px-3 text-xs rounded-xl border text-center transition-all cursor-pointer ${
-                      aspectRatio === "9:16" 
-                        ? "bg-purple-950/20 border-purple-500 text-purple-200" 
-                        : "bg-neutral-950 border-neutral-800 text-neutral-400"
-                    }`}
-                  >
-                    9:16 Portrait
-                  </button>
-                  <button
-                    onClick={() => setAspectRatio("16:9")}
-                    className={`py-1.5 px-3 text-xs rounded-xl border text-center transition-all cursor-pointer ${
-                      aspectRatio === "16:9" 
-                        ? "bg-purple-950/20 border-purple-500 text-purple-200" 
-                        : "bg-neutral-950 border-neutral-800 text-neutral-400"
-                    }`}
-                  >
-                    16:9 Landscape
-                  </button>
-                </div>
-              </div>
-
-              {/* FPS option */}
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-neutral-400 flex items-center gap-1.5">
-                  <Sliders className="h-3.5 w-3.5 text-purple-400" />
-                  Frame Rate (FPS)
-                </label>
-                <div className="flex items-center gap-3 bg-neutral-950 border border-neutral-800 rounded-xl px-3 py-1.5">
-                  <input 
-                    type="range" 
-                    min={12} 
-                    max={60} 
-                    step={6}
-                    value={frameRate} 
-                    onChange={(e) => setFrameRate(Number(e.target.value))} 
-                    className="w-full accent-purple-500 bg-neutral-800"
-                  />
-                  <span className="text-xs font-mono text-[#dcdcdc] shrink-0 font-semibold">{frameRate} FPS</span>
-                </div>
-              </div>
-
-            </div>
-          </div>
 
           {/* DYNAMIC STORYBOARD TIMELINE DECK */}
-          {panels.length > 0 && (
-            <div id="panels_timeline_section" className="bg-neutral-900/60 rounded-2xl border border-neutral-800 p-6 space-y-4">
-              <div>
-                <h3 className="font-bold text-base text-white">Dynamic Storyboard & OCR Transcription</h3>
-                <p className="text-xs text-neutral-400">Review live isolated panel frames. Adjust speech transcripts locally below.</p>
-              </div>
-
-              {/* Storyboard grid */}
-              <div className="flex gap-4 overflow-x-auto pb-4 scrollbar-thin">
-                {panels.map((panel, idx) => {
-                  const isCurrent = idx === currentPanelIndex && activePreviewTab === "storyboard";
-                  return (
-                    <div
-                      key={panel.id}
-                      className={`w-[260px] shrink-0 rounded-xl border p-3.5 space-y-3 transition-all ${
-                        isCurrent 
-                          ? "bg-neutral-800/80 border-purple-500 shadow-lg" 
-                          : "bg-neutral-950 border-neutral-800"
-                      }`}
-                    >
-                      {/* Image Thumbnail */}
-                      <div 
-                        onClick={() => {
-                          setCurrentPanelIndex(idx);
-                          setActivePreviewTab("storyboard");
-                          setPlaybackTime(0);
-                        }}
-                        className="relative h-32 rounded-lg overflow-hidden cursor-pointer select-none bg-neutral-950 border border-neutral-800 flex items-center justify-center group"
-                      >
-                        <img 
-                          src={panel.image_url} 
-                          alt={`Panel ${panel.id}`} 
-                          className="w-full h-full object-contain object-center group-hover:scale-105 transition-transform duration-300"
-                          referrerPolicy="no-referrer"
-                          onError={(e) => {
-                            // If load fails, render placeholder or standard label
-                            const target = e.target as HTMLImageElement;
-                            target.style.display = "none";
-                          }}
-                        />
-                        
-                        {/* Number tag */}
-                        <div className="absolute top-2 left-2 h-5 w-5 rounded bg-black/80 backdrop-blur flex items-center justify-center font-mono text-[10px] text-purple-400 font-bold border border-purple-900/40">
-                          #{panel.id}
-                        </div>
-
-                        {/* Motion overlay text */}
-                        <div className="absolute bottom-2 right-2 px-1.5 py-0.5 rounded bg-black/80 text-[9px] font-mono uppercase tracking-wider text-neutral-300">
-                          {panel.motion_type}
-                        </div>
-                      </div>
-
-                      {/* Text OCR Editable Input */}
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-mono text-neutral-500 uppercase tracking-wider block">Dialogue/Subtitle Text</label>
-                        <textarea
-                          rows={2}
-                          value={panel.speech_text}
-                          onChange={(e) => handleModifySpeechText(panel.id, e.target.value)}
-                          className="w-full bg-neutral-900 border border-neutral-800 text-[11px] rounded-lg p-2 text-neutral-100 outline-none focus:border-purple-500 font-sans"
-                        />
-                      </div>
-
-                      {/* Playback specifications */}
-                      <div className="grid grid-cols-2 gap-2 pt-1.5 border-t border-neutral-900/80">
-                        <div>
-                          <span className="text-[9px] font-mono text-neutral-500 uppercase block">Cam Motion</span>
-                          <select
-                            value={panel.motion_type}
-                            onChange={(e) => handleModifyMotion(panel.id, e.target.value)}
-                            className="bg-neutral-900 text-[11px] text-neutral-300 rounded border border-neutral-800 p-1 w-full outline-none"
-                          >
-                            <option value="zoom_in">Zoom In</option>
-                            <option value="zoom_out">Zoom Out</option>
-                            <option value="pan_right">Pan Right</option>
-                            <option value="pan_left">Pan Left</option>
-                            <option value="pan_down">Pan Down</option>
-                          </select>
-                        </div>
-
-                        <div>
-                          <span className="text-[9px] font-mono text-neutral-500 uppercase block">Timing (sec)</span>
-                          <div className="flex items-center gap-1">
-                            <input
-                              type="number"
-                              min={1}
-                              max={15}
-                              step={0.5}
-                              value={panel.duration}
-                              onChange={(e) => handleModifyDuration(panel.id, parseFloat(e.target.value) || 4.0)}
-                              className="bg-neutral-900 text-[11px] text-neutral-300 rounded border border-neutral-800 p-1 w-full outline-none"
-                            />
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="flex items-center justify-between text-[9px] text-neutral-500 pt-1 font-mono">
-                        <span>SFX: {panel.sfx || "None"}</span>
-                        <span>{idx + 1} / {panels.length}</span>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
+          <StoryboardTimeline
+            panels={panels}
+            setPanels={setPanels}
+            currentPanelIndex={currentPanelIndex}
+            setCurrentPanelIndex={setCurrentPanelIndex}
+            activePreviewTab={activePreviewTab}
+            setActivePreviewTab={setActivePreviewTab}
+            setPlaybackTime={setPlaybackTime}
+            hasScrapedImages={scrapedImages.length > 0}
+          />
 
         </div>
 
         {/* RIGHT COLUMN: INTEGRATED CINEMA PLAYER */}
         <div id="cinema_column" className="lg:col-span-5 flex flex-col gap-6 sticky top-24">
           
-          <div className="flex items-center justify-between">
-            <div className="flex gap-2">
-              <button
-                onClick={() => setActivePreviewTab("video")}
-                disabled={!videoUrl}
-                className={`px-3 py-1 text-xs rounded-lg transition-all ${
-                  !videoUrl 
-                    ? "opacity-40 cursor-not-allowed"
-                    : activePreviewTab === "video"
-                    ? "bg-purple-600 text-white font-bold"
-                    : "bg-neutral-900 text-neutral-300 hover:text-white"
-                }`}
-              >
-                Output MP4 Player
-              </button>
-              <button
-                onClick={() => setActivePreviewTab("storyboard")}
-                disabled={panels.length === 0}
-                className={`px-3 py-1 text-xs rounded-lg transition-all ${
-                  panels.length === 0 
-                    ? "opacity-40 cursor-not-allowed"
-                    : activePreviewTab === "storyboard"
-                    ? "bg-purple-600 text-white font-bold"
-                    : "bg-neutral-900 text-neutral-300 hover:text-white"
-                }`}
-              >
-                Storyboard Preview
-              </button>
-            </div>
-
-            <span className="text-[10px] font-mono bg-neutral-950 border border-neutral-800 px-2 py-0.5 rounded text-neutral-400">
-              {aspectRatio === "9:16" ? "Portrait (1080x1920)" : "Landscape (1920x1080)"}
-            </span>
-          </div>
-
-          {/* ACTIVE VIEWPORT FRAME */}
-          <div id="video_monitor_outer_wrapper" className="relative bg-neutral-950 border border-neutral-800 rounded-2xl overflow-hidden shadow-2xl flex items-center justify-center p-3 min-h-[400px]">
-            
-            {/* Ambient Background Glow */}
-            <div className="absolute h-56 w-56 rounded-full bg-purple-600/10 blur-3xl" />
-
-            {/* IF NO VIDEO GENERATED YET -> SHOW ILLUSTRATIVE EMPTY STATE */}
-            {!videoUrl && panels.length === 0 && (
-              <div className="flex flex-col items-center justify-center text-center p-8 space-y-4">
-                <div className="h-14 w-14 rounded-2xl bg-neutral-900 border border-neutral-800 flex items-center justify-center text-neutral-500">
-                  <Film className="h-6 w-6" />
-                </div>
-                <div className="space-y-1">
-                  <p className="text-xs font-bold text-neutral-300 font-sans">Preview Screen Unallocated</p>
-                  <p className="text-[11px] text-neutral-500 max-w-[240px] leading-relaxed">
-                    Paste your target webtoon viewer URL on the left and click "Generate Video" to execute the scraper compiler.
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {/* TAB 1: HTML5 PREVIEWING MP4 PLAYER */}
-            {videoUrl && activePreviewTab === "video" && (
-              <div 
-                className="relative bg-black border border-neutral-800 overflow-hidden rounded-xl flex flex-col justify-between transition-all duration-300 shadow w-full"
-                style={aspectRatio === "9:16" ? { maxWidth: "270px", aspectRatio: "9/16" } : { maxWidth: "100%", aspectRatio: "16/9" }}
-              >
-                <video
-                  ref={videoPlayerRef}
-                  src={videoUrl}
-                  controls
-                  autoPlay
-                  playsInline
-                  className="w-full h-full object-contain bg-black"
-                />
-              </div>
-            )}
-
-            {/* TAB 2: INTERACTIVE STORYBOARD PREVIEW SIMULATOR */}
-            {panels.length > 0 && activePreviewTab === "storyboard" && activeStoryboardPanel && (
-              <div 
-                className="relative bg-neutral-950 border border-neutral-800/80 overflow-hidden rounded-xl flex flex-col justify-between transition-all duration-300 shadow w-full text-center"
-                style={aspectRatio === "9:16" ? { maxWidth: "270px", height: "480px" } : { maxWidth: "100%", aspectRatio: "16/9" }}
-              >
-                {/* Image under cinematic pan animations */}
-                <div className="absolute inset-0 overflow-hidden flex items-center justify-center bg-black">
-                  <img
-                    src={activeStoryboardPanel.image_url}
-                    alt="Active Frame"
-                    className="w-full h-full object-contain"
-                    referrerPolicy="no-referrer"
-                    style={{
-                      transform: activeStoryboardPanel.motion_type === "zoom_in" ? `scale(${1 + (playbackTime * 0.02)})` :
-                                 activeStoryboardPanel.motion_type === "zoom_out" ? `scale(${1.15 - (playbackTime * 0.02)})` :
-                                 activeStoryboardPanel.motion_type === "pan_right" ? `translateX(${playbackTime * 4}px)` :
-                                 activeStoryboardPanel.motion_type === "pan_left" ? `translateX(${-playbackTime * 4}px)` :
-                                 activeStoryboardPanel.motion_type === "pan_down" ? `translateY(${playbackTime * 4}px)` : "",
-                      transition: "transform 100ms linear"
-                    }}
-                  />
-                </div>
-
-                {/* Overlays */}
-                <div className="absolute top-0 left-0 right-0 h-16 bg-gradient-to-b from-black/80 to-transparent pointer-events-none" />
-                <div className="absolute bottom-0 left-0 right-0 h-28 bg-gradient-to-t from-black/90 to-transparent pointer-events-none" />
-
-                {/* Subtitle badge inside storyboard preview */}
-                <div className="absolute top-3 left-3 right-3 flex items-center justify-between text-[10px] font-mono text-neutral-300 select-none">
-                  <span className="bg-black/80 px-2 py-1 rounded border border-neutral-800/50">
-                    FRAME #{activeStoryboardPanel.id}
-                  </span>
-                  <span className="bg-purple-950/85 text-purple-400 px-2 py-0.5 rounded border border-purple-800/40">
-                    STORYBOARD PREVIEW
-                  </span>
-                </div>
-
-                {/* Subtitles Overlay */}
-                <div className="absolute bottom-4 left-3 right-3 z-10 text-center">
-                  {activeStoryboardPanel.sfx && (
-                    <span className="inline-block transform -rotate-2 bg-yellow-500 text-black font-extrabold text-[10px] px-2 py-0.5 rounded shadow-lg font-mono tracking-widest uppercase mb-1">
-                      {activeStoryboardPanel.sfx}
-                    </span>
-                  )}
-                  <p className="text-white font-bold text-xs leading-relaxed drop-shadow-[0_2px_4px_rgba(0,0,0,1)] bg-black/60 p-2.5 rounded-lg border border-white/5 backdrop-blur-xs text-center font-sans">
-                    {activeStoryboardPanel.speech_text}
-                  </p>
-                </div>
-              </div>
-            )}
-          </div>
+          <VideoMonitor
+            activePreviewTab={activePreviewTab}
+            setActivePreviewTab={setActivePreviewTab}
+            videoUrl={videoUrl}
+            panels={panels}
+            aspectRatio={aspectRatio}
+            videoPlayerRef={videoPlayerRef}
+            currentPanelIndex={currentPanelIndex}
+            playbackTime={playbackTime}
+            reprocessingPanelId={reprocessingPanelId}
+          />
 
           {/* PLAYBACK CONTROLLER ACCESSORIES FOR STORYBOARD PREVIEW */}
           {activePreviewTab === "storyboard" && panels.length > 0 && (
-            <div id="video_controls_card" className="bg-neutral-900 p-4 rounded-2xl border border-neutral-800 space-y-4">
-              <div className="space-y-1">
-                <div className="flex items-center justify-between text-xs font-mono text-neutral-400">
-                  <span>Storyboard Sync Progress</span>
-                  {activeStoryboardPanel && (
-                    <span>{playbackTime.toFixed(1)}s / {activeStoryboardPanel.duration}s</span>
-                  )}
-                </div>
-                
-                <div className="relative h-2 bg-neutral-950 rounded-full overflow-hidden border border-neutral-850">
-                  {activeStoryboardPanel && (
-                    <div 
-                      className="bg-purple-500 h-full transition-all duration-100 ease-linear"
-                      style={{ width: `${(playbackTime / activeStoryboardPanel.duration) * 100}%` }}
-                    />
-                  )}
-                </div>
-              </div>
+            <VolumeAndProgressPanel
+              panels={panels}
+              currentPanelIndex={currentPanelIndex}
+              playbackTime={playbackTime}
+              storyboardPlaying={storyboardPlaying}
+              toggleStoryboardPlayback={toggleStoryboardPlayback}
+              resetStoryboardPlayback={resetStoryboardPlayback}
+              isMuted={isMuted}
+              setIsMuted={setIsMuted}
+              volume={volume}
+              setVolume={setVolume}
+            />
+          )}
 
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2">
-                  <button
-                    onClick={toggleStoryboardPlayback}
-                    className="bg-purple-600 hover:bg-purple-500 text-white p-3 rounded-full cursor-pointer hover:scale-105 transition-transform"
-                  >
-                    {storyboardPlaying ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 fill-white" />}
-                  </button>
-                  
-                  <button
-                    onClick={resetStoryboardPlayback}
-                    className="p-3 bg-neutral-800 hover:bg-neutral-700 hover:text-white rounded-xl text-neutral-400 cursor-pointer"
-                  >
-                    <RotateCcw className="h-4 w-4" />
-                  </button>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <button onClick={() => setIsMuted(!isMuted)} className="text-neutral-400 hover:text-white">
-                    {isMuted || volume === 0 ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
-                  </button>
-                  <input
-                    type="range"
-                    min={0}
-                    max={100}
-                    value={volume}
-                    onChange={(e) => setVolume(Number(e.target.value))}
-                    className="w-20 sm:w-28 accent-purple-500 bg-neutral-800"
-                  />
-                </div>
-
-                <div className="text-right">
-                  <span className="text-[10px] uppercase font-mono text-neutral-500 block">Active Scene</span>
-                  <span className="text-xs font-semibold text-white">Scene #{currentPanelIndex + 1}</span>
-                </div>
-              </div>
-            </div>
+          {/* VISUAL IMAGE ENHANCER MATRIX */}
+          {panels.length > 0 && panels[currentPanelIndex] && (
+            <ImageEnhancer
+              panels={panels}
+              setPanels={setPanels}
+              currentPanelIndex={currentPanelIndex}
+              setCurrentPanelIndex={setCurrentPanelIndex}
+              setConsoleLogs={setConsoleLogs}
+            />
           )}
 
           {/* METADATA RENDER MATRIX */}
@@ -827,18 +830,18 @@ export default function App() {
             
             <div className="grid grid-cols-2 gap-y-3 gap-x-6 text-xs text-neutral-300">
               <div className="flex items-center justify-between border-b border-neutral-800/50 pb-2">
-                <span className="text-neutral-500">Codec</span>
+                <span className="text-neutral-500 font-sans">Codec</span>
                 <span className="font-mono font-semibold">H.264 (MP4 Wrapper)</span>
               </div>
               <div className="flex items-center justify-between border-b border-neutral-800/50 pb-2">
-                <span className="text-neutral-500">Soundtrack</span>
-                <span className="font-semibold text-purple-400 truncate max-w-[120px] block" title={musicTheme}>
+                <span className="text-neutral-500 font-sans">Soundtrack</span>
+                <span className="font-sans font-semibold text-purple-400 truncate max-w-[124px] block" title={musicTheme}>
                   {musicTheme}
                 </span>
               </div>
               <div className="flex items-center justify-between border-b border-neutral-800/50 pb-2 col-span-2">
-                <span className="text-neutral-500">Active Speaker</span>
-                <span className="font-semibold text-purple-400">{voiceActor}</span>
+                <span className="text-neutral-500 font-sans">Active Speaker</span>
+                <span className="font-sans font-semibold text-purple-400">{voiceActor}</span>
               </div>
               {videoUrl && (
                 <div className="flex items-center justify-between col-span-2 text-emerald-400 font-mono text-[11px] bg-emerald-950/20 border border-emerald-900/35 px-2.5 py-1.5 rounded-lg">
@@ -854,7 +857,7 @@ export default function App() {
                 <a
                   href={videoUrl}
                   download={`webtoon_cinemamaster_${Math.random().toString(36).substring(2, 6)}.mp4`}
-                  className="w-full bg-purple-600 hover:bg-purple-500 text-white font-medium text-xs py-3 rounded-xl flex items-center justify-center gap-2 transition-all cursor-pointer select-none shadow-lg shadow-purple-900/30"
+                  className="w-full bg-purple-600 hover:bg-purple-500 text-white font-medium text-xs py-3 rounded-xl flex items-center justify-center gap-2 transition-all cursor-pointer select-none shadow-lg shadow-purple-900/30 font-sans"
                 >
                   <Download className="h-4 w-4" />
                   <span>Download Master MP4 File</span>
@@ -871,6 +874,28 @@ export default function App() {
       <footer id="footer_pane" className="border-t border-neutral-850 bg-neutral-950/20 py-6 text-center text-xs text-neutral-500">
         <p className="font-mono">Webtoon-to-Video compilation dashboard &bull; Real-time Scraper Integration</p>
       </footer>
+
+      {/* IMAGE CROPPER & BACKGROUND TRIM MODAL */}
+      <CropEditorModal
+        editingImageIdx={editingImageIdx}
+        setEditingImageIdx={setEditingImageIdx}
+        editCropTop={editCropTop}
+        setEditCropTop={setEditCropTop}
+        editCropBottom={editCropBottom}
+        setEditCropBottom={setEditCropBottom}
+        editCropLeft={editCropLeft}
+        setEditCropLeft={setEditCropLeft}
+        editCropRight={editCropRight}
+        setEditCropRight={setEditCropRight}
+        editAutoTrim={editAutoTrim}
+        setEditAutoTrim={setEditAutoTrim}
+        scrapedImages={scrapedImages}
+        setScrapedImages={setScrapedImages}
+        isSavingEdit={isSavingEdit}
+        handleSaveEditedImage={handleSaveEditedImage}
+        handleSaveMultipleCuts={handleSaveMultipleCuts}
+        setConsoleLogs={setConsoleLogs}
+      />
 
     </div>
   );
