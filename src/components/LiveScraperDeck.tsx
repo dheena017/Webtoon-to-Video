@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { 
   Image as ImageIcon, 
   RefreshCw, 
@@ -11,11 +11,13 @@ import {
   Trash,
   Sliders,
   Brain,
+  Download,
   X
 } from "lucide-react";
 import { GeneratedPanel } from "../types";
 
 import { NotificationType } from "./NotificationStack";
+import JSZip from "jszip";
 
 interface LiveScraperDeckProps {
   scrapedImages: string[];
@@ -66,6 +68,8 @@ export default function LiveScraperDeck({
   const [cropBackgroundMode, setCropBackgroundMode] = React.useState<string>("auto"); // 'auto', 'white', 'black'
   const [autoSplitTallStrips, setAutoSplitTallStrips] = React.useState<boolean>(true); // Slices vertical webtoons strips!
   const [showAutoCropSettings, setShowAutoCropSettings] = React.useState<boolean>(false);
+
+  const [isZipping, setIsZipping] = React.useState<boolean>(false);
 
   if (!isScraping && scrapedImages.length === 0) return null;
 
@@ -385,8 +389,8 @@ export default function LiveScraperDeck({
       ) : (
         <div className="space-y-4">
           {/* Select Toolbar */}
-          <div className="flex flex-wrap items-center justify-between gap-3 bg-neutral-950/40 p-3 rounded-xl border border-neutral-800/60">
-            <div className="space-y-0.5">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 bg-neutral-950/40 p-3 rounded-xl border border-neutral-800/60">
+            <div className="space-y-0.5 shrink-0">
               <p className="text-xs text-neutral-400">
                 These live graphics are separated dynamically from the viewer URL.
               </p>
@@ -397,7 +401,8 @@ export default function LiveScraperDeck({
               )}
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap lg:flex-nowrap items-center gap-2 overflow-x-auto pb-1 lg:pb-0 hide-scrollbar w-full lg:w-auto">
+              {/* Group 1: Selection */}
               <button
                 onClick={() => {
                   if (selectedScraped.length === scrapedImages.length) {
@@ -409,7 +414,7 @@ export default function LiveScraperDeck({
                   }
                 }}
                 disabled={scrapedImages.length === 0}
-                className="bg-neutral-900 hover:bg-neutral-800 text-neutral-300 hover:text-white px-2.5 py-1.5 rounded-lg text-xs font-mono border border-neutral-800/60 cursor-pointer flex items-center gap-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                className="shrink-0 bg-neutral-900/80 hover:bg-neutral-800 text-neutral-300 hover:text-white px-3 py-2 rounded-lg text-[11px] uppercase tracking-wider font-semibold font-sans border border-neutral-800/60 cursor-pointer flex items-center gap-1.5 transition-colors shadow-sm disabled:opacity-40 disabled:cursor-not-allowed"
               >
                 {selectedScraped.length === scrapedImages.length && scrapedImages.length > 0 ? (
                   <>
@@ -418,69 +423,166 @@ export default function LiveScraperDeck({
                   </>
                 ) : (
                   <>
-                    <CheckSquare className="h-3.5 w-3.5 text-purple-400" />
+                    <CheckSquare className="h-3.5 w-3.5 text-indigo-400" />
                     <span>Select All</span>
                   </>
                 )}
               </button>
 
-              <div className="flex bg-neutral-900 border border-neutral-800/60 rounded-lg">
+              <div className="hidden sm:block shrink-0 h-5 w-px bg-neutral-800 mx-1"></div>
+
+              {/* Group 2: Image Processing Tools */}
+              <div className="shrink-0 flex items-stretch bg-neutral-900/80 border border-neutral-800/60 rounded-lg overflow-hidden shadow-sm">
                 <button
                   onClick={handleAutoCropSelected}
                   disabled={isBatchCropping || selectedScraped.length === 0}
-                  className="bg-indigo-650 hover:bg-indigo-550 border-r border-indigo-500/30 text-white px-3 py-1.5 rounded-l-lg text-xs font-mono cursor-pointer flex items-center gap-1.5 transition-all font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="bg-indigo-500/10 hover:bg-indigo-500/20 border-r border-neutral-800/60 text-indigo-300 px-3 py-2 flex items-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                  title="Auto-Crop with Standard CV"
                 >
                   {isBatchCropping ? (
                     <RefreshCw className="h-3.5 w-3.5 animate-spin" />
                   ) : (
-                    <Scissors className="h-3.5 w-3.5 text-indigo-300" />
+                    <Scissors className="h-3.5 w-3.5" />
                   )}
-                  <span>{isAiEnabled ? "Smart Crop" : "Auto-Crop"}</span>
+                  <span className="text-[11px] uppercase tracking-wider font-semibold font-sans">Auto-Crop</span>
                 </button>
 
                 <button
                   onClick={isAiEnabled ? handleAiCropSelected : handleAutoCropSelected}
                   disabled={(isAiEnabled ? isAiCropping : isBatchCropping) || selectedScraped.length === 0}
-                  className="bg-purple-800 hover:bg-purple-700 text-white px-2.5 py-1.5 text-xs font-mono cursor-pointer flex items-center gap-1.5 transition-all font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="bg-purple-500/10 hover:bg-purple-500/20 border-r border-neutral-800/60 text-purple-300 px-3 py-2 flex items-center gap-2 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
+                  title="Auto-Crop with AI models"
                 >
                    {isAiEnabled ? (
-                     isAiCropping ? <RefreshCw className="h-3.5 w-3.5 animate-spin"/> : <Brain className="h-3.5 w-3.5 text-purple-200" />
+                     isAiCropping ? <RefreshCw className="h-3.5 w-3.5 animate-spin"/> : <Brain className="h-3.5 w-3.5" />
                    ) : (
-                     <Scissors className="h-3.5 w-3.5 text-purple-200" />
+                     <Scissors className="h-3.5 w-3.5" />
                    )}
-                   <span>{isAiEnabled ? "Process (AI)" : "Process (Standard)"}</span>
+                   <span className="text-[11px] uppercase tracking-wider font-semibold font-sans">Process {isAiEnabled ? "(AI)" : ""}</span>
                 </button>
 
                 <button
                   onClick={() => setShowAutoCropSettings(prev => !prev)}
-                  className={`px-2.5 py-1.5 rounded-r-lg text-xs font-mono cursor-pointer flex items-center transition-all ${
+                  className={`px-3 py-2 flex items-center justify-center transition-all ${
                     showAutoCropSettings 
-                      ? "bg-purple-950 text-purple-200" 
-                      : "bg-neutral-900 hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200"
+                      ? "bg-purple-900 text-purple-200" 
+                      : "bg-neutral-900/50 hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200"
                   }`}
                   title="Configure smart Auto-Crop parameters (strength, margins, separation)"
                 >
-                  <Sliders className="h-3.5 w-3.5 text-purple-400" />
+                  <Sliders className="h-4 w-4" />
                 </button>
               </div>
 
-              <button
-                onClick={() => {
-                  if (selectedScraped.length === 0) return;
-                  setScrapedImages(prev => prev.filter(img => !selectedScraped.includes(img)));
-                  setConsoleLogs(prev => [
-                    `[GUI] Removed ${selectedScraped.length} selected images from the deck`,
-                    ...prev
-                  ]);
-                  setSelectedScraped([]);
-                }}
-                className="bg-red-950/40 hover:bg-red-900/60 text-red-300 hover:text-red-100 px-2.5 py-1.5 rounded-lg text-xs font-mono border border-red-900/40 cursor-pointer flex items-center gap-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                disabled={selectedScraped.length === 0}
-              >
-                <Trash2 className="h-3.5 w-3.5 text-red-400" />
-                <span>Delete Selected</span>
-              </button>
+              <div className="hidden sm:block shrink-0 h-5 w-px bg-neutral-800 mx-1"></div>
 
+              {/* Group 3: Utility / Downstream Actions */}
+              <div className="shrink-0 flex items-stretch bg-neutral-900/80 border border-neutral-800/60 rounded-lg overflow-hidden shadow-sm">
+                <button
+                  onClick={async () => {
+                    const isSelected = selectedScraped.length > 0;
+                    const toDownload = isSelected ? selectedScraped : scrapedImages;
+                    if (toDownload.length === 0) return;
+                    setIsZipping(true);
+
+                    if (isSelected) {
+                      addNotification(`Downloading ${toDownload.length} selected image(s)...`, "info");
+                      try {
+                        for (let i = 0; i < toDownload.length; i++) {
+                          const url = toDownload[i];
+                          const res = await fetch(url);
+                          const blob = await res.blob();
+                          const blobUrl = URL.createObjectURL(blob);
+                          const a = document.createElement("a");
+                          a.href = blobUrl;
+                          a.download = `webtoon_frame_selected_${String(i + 1).padStart(3, '0')}.png`;
+                          document.body.appendChild(a);
+                          a.click();
+                          document.body.removeChild(a);
+                          URL.revokeObjectURL(blobUrl);
+                        }
+                        setConsoleLogs(prev => [`[GUI] Successfully downloaded ${toDownload.length} individual images`, ...prev]);
+                        addNotification(`Finished downloading ${toDownload.length} individual image(s).`, "success");
+                      } catch (err) {
+                        console.error("Download failed:", err);
+                        addNotification("Failed to download one or more images", "error");
+                      } finally {
+                        setIsZipping(false);
+                      }
+                      return;
+                    }
+
+                    addNotification(`Zipping ${toDownload.length} image(s)...`, "info");
+                    
+                    try {
+                      const zip = new JSZip();
+                      const folder = zip.folder("webtoon_frames");
+                      
+                      if (!folder) {
+                         addNotification("Failed to create zip folder", "error");
+                         setIsZipping(false);
+                         return;
+                      }
+
+                      for (let i = 0; i < toDownload.length; i++) {
+                        try {
+                          const url = toDownload[i];
+                          const res = await fetch(url);
+                          const blob = await res.blob();
+                          const filename = `webtoon_frame_${String(i + 1).padStart(3, '0')}.png`;
+                          folder.file(filename, blob);
+                        } catch (err) {
+                          console.error("Download failed for:", toDownload[i], err);
+                        }
+                      }
+                      
+                      const content = await zip.generateAsync({ type: "blob" });
+                      const zipUrl = URL.createObjectURL(content);
+                      const a = document.createElement("a");
+                      a.href = zipUrl;
+                      a.download = "webtoon_frames.zip";
+                      document.body.appendChild(a);
+                      a.click();
+                      document.body.removeChild(a);
+                      URL.revokeObjectURL(zipUrl);
+                      
+                      setConsoleLogs(prev => [`[GUI] Successfully downloaded ${toDownload.length} images as zip`, ...prev]);
+                      addNotification(`Finished downloading ${toDownload.length} image(s) as zip.`, "success");
+                    } catch (err) {
+                      console.error("Zip generation failed:", err);
+                      addNotification("Failed to generate zip file", "error");
+                    } finally {
+                      setIsZipping(false);
+                    }
+                  }}
+                  disabled={scrapedImages.length === 0 || isZipping}
+                  className="bg-neutral-900/50 hover:bg-neutral-800 border-r border-neutral-800/60 text-neutral-300 hover:text-white px-3 py-2 flex items-center gap-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  title={selectedScraped.length > 0 ? "Download Selected" : "Download All"}
+                >
+                  {isZipping ? <RefreshCw className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
+                  <span className="text-[11px] uppercase tracking-wider font-semibold font-sans">{isZipping ? "DOWNLOADING..." : selectedScraped.length > 0 ? "Download Selected" : "Download All (ZIP)"}</span>
+                </button>
+
+                <button
+                  onClick={() => {
+                    if (selectedScraped.length === 0) return;
+                    setScrapedImages(prev => prev.filter(img => !selectedScraped.includes(img)));
+                    setConsoleLogs(prev => [
+                      `[GUI] Removed ${selectedScraped.length} selected images from the deck`,
+                      ...prev
+                    ]);
+                    setSelectedScraped([]);
+                  }}
+                  className="bg-red-950/20 hover:bg-red-900/60 text-red-400 hover:text-red-300 px-3 py-2 flex items-center justify-center transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                  disabled={selectedScraped.length === 0}
+                  title="Delete Selected"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span className="sr-only">Delete</span>
+                </button>
+              </div>
+
+              {/* Group 4: Insert (Primary Action) */}
               <button
                 onClick={() => {
                   if (selectedScraped.length === 0) return;
@@ -504,11 +606,11 @@ export default function LiveScraperDeck({
                   ]);
                   setSelectedScraped([]);
                 }}
-                className="bg-purple-600 hover:bg-purple-500 text-white px-2.5 py-1.5 rounded-lg text-xs font-mono cursor-pointer flex items-center gap-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                className="shrink-0 lg:ml-auto bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white px-4 py-2 flex items-center justify-center gap-2 rounded-lg shadow-md transition-all cursor-pointer font-sans disabled:opacity-40 disabled:cursor-not-allowed transform hover:scale-[1.02] active:scale-95"
                 disabled={selectedScraped.length === 0}
               >
-                <Plus className="h-3.5 w-3.5" />
-                <span>Insert Selected</span>
+                <Plus className="h-4 w-4" />
+                <span className="text-[11px] uppercase tracking-wider font-bold">Add to Canvas</span>
               </button>
             </div>
           </div>

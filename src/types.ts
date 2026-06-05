@@ -14,11 +14,3 @@ export interface GeneratedPanel {
   smart_crop?: boolean;
   crop_padding?: number;
 }
-
-export interface SamplePreset {
-  name: string;
-  url: string;
-}
-
-export const SAMPLE_PRESETS: SamplePreset[] = [
-];

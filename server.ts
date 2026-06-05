@@ -738,7 +738,7 @@ app.post("/api/undo-crop", (req, res) => {
 });
 
 // Endpoint to use AI to detect panel crops
-app.post("/api/ai-detect-panels", async (req, res) => {
+app.post(["/api/ai-detect-panels", "/api/detect-panels"], async (req, res) => {
   const { url, model } = req.body;
   if (!url) {
     return res.status(400).json({ error: "Parameter 'url' is required." });
@@ -776,8 +776,9 @@ app.post("/api/ai-detect-panels", async (req, res) => {
       throw new Error("Gemini AI client not initialized.");
     }
 
+    const targetModelUrl = model || "gemini-2.5-flash";
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: targetModelUrl,
       contents: {
         parts: [
           {
@@ -819,7 +820,7 @@ app.post("/api/ai-detect-panels", async (req, res) => {
       const base64ImageForRetry = base64Image;
       try {
         const response = await ai.models.generateContent({
-           model: "gemini-3.5-flash",
+           model: model || "gemini-2.5-flash",
            contents: {
              parts: [
                {
@@ -854,41 +855,16 @@ app.post("/api/ai-detect-panels", async (req, res) => {
         const text = response.text || "[]";
         const panels = JSON.parse(text.trim());
         return res.json({ success: true, panels });
-      } catch (retryErr) {
-        console.warn("[AI Detect API] Retry failed, falling back to local detection", retryErr);
+      } catch (retryErr: any) {
+        console.warn("[AI Detect API] Retry failed, falling back to local detection", retryErr.message || "Quota exceeded");
       }
     }
     
-    console.error("[AI Detect API] Complete error details:", err);
+    console.error("[AI Detect API] Complete error details:", err.message || "Unknown error");
     return res.status(500).json({ error: `AI analysis failed: ${err.message || 'Unknown error'}` });
   }
 });
 
-// Endpoint to run OpenCV panel contours-detection pass on the image
-app.post("/api/detect-panels", async (req, res) => {
-  const { url, sensitivity = 30 } = req.body;
-  if (!url) {
-    return res.status(400).json({ error: "Parameter 'url' is required." });
-  }
-
-  try {
-    const response = await fetch("http://127.0.0.1:8000/api/detect-panels", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ url })
-    });
-
-    if (response.ok) {
-      const data = await response.json();
-      return res.json(data);
-    }
-    const errorText = await response.text();
-    throw new Error(`Python FastAPI returned status ${response.status}: ${errorText}`);
-  } catch (err: any) {
-    console.error("[Express Proxy] Failed to contact FastAPI detect-panels:", err.message);
-    return res.status(err.status || 500).json({ error: `AI panel detection service: ${err.message}` });
-  }
-});
 
 // Cached endpoint to fetch compiled vertical panels safely with typical GET src attributes
 app.get("/api/stitch-images/cached/:id", (req, res) => {
@@ -1310,7 +1286,7 @@ Output strictly valid JSON with top-level key "panels".`;
   if (ai) {
     try {
       const aiResponse = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
+        model: model || "gemini-2.5-flash",
         contents: prompt,
         config: {
           responseMimeType: "application/json",
@@ -1357,7 +1333,7 @@ Output strictly valid JSON with top-level key "panels".`;
         await new Promise(resolve => setTimeout(resolve, 5000));
         try {
           const aiResponse = await ai.models.generateContent({
-            model: "gemini-3.5-flash",
+            model: model || "gemini-2.5-flash",
             contents: prompt,
             config: {
               responseMimeType: "application/json",
@@ -1398,11 +1374,11 @@ Output strictly valid JSON with top-level key "panels".`;
               }));
             }
           }
-        } catch (retryErr) {
-          console.warn("[Gemini Script] Retry also failed. Falling back to programmatic narrator.", retryErr);
+        } catch (retryErr: any) {
+          console.warn("[Gemini Script] Retry also failed. Falling back to programmatic narrator.", retryErr.message || "Quota exceeded");
         }
       } else {
-        console.warn("[Gemini Script] Storyboard automatic generation failed, falling back to programmatic narrator.", err);
+        console.warn("[Gemini Script] Storyboard automatic generation failed, falling back to programmatic narrator.", err.message || "Unknown error");
       }
     }
   }
@@ -1681,11 +1657,11 @@ You MUST return the output STRICTLY as a JSON array inside the 'panels' field of
               });
             }
           }
-        } catch (retryErr) {
-          console.warn('Gemini custom script generation failed on retry. Falling back.', retryErr);
+        } catch (retryErr: any) {
+          console.warn('Gemini custom script generation failed on retry. Falling back.', retryErr.message || "Quota exceeded");
         }
       } else {
-        console.warn('Gemini custom script generation failed, falling back to dynamic search patterns.', aiErr);
+        console.warn('Gemini custom script generation failed, falling back to dynamic search patterns.', aiErr.message || "Unknown error");
       }
     }
   }
@@ -1726,7 +1702,7 @@ You MUST return the output STRICTLY as a JSON array inside the 'panels' field of
     panels: responsePanels
   });
 } catch (err: any) {
-  console.error("[API Generate Error]", err);
+  console.error("[API Generate Error]", err.message || err);
   res.status(500).json({ error: err.message || "An unexpected error occurred during generation." });
 }
 });

@@ -15,7 +15,7 @@ import {
   playComicSoundEffect 
 } from "./audio";
 
-import { GeneratedPanel, SAMPLE_PRESETS } from "./types";
+import { GeneratedPanel } from "./types";
 import { parseWebtoonUrl } from "./utils";
 import { AI_MODELS } from "./models";
 
@@ -687,35 +687,15 @@ export default function App() {
                     type="url" 
                     value={targetUrl}
                     onChange={(e) => setTargetUrl(e.target.value.trim())}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' && !isProcessing && targetUrl.trim()) {
+                        handleGenerateVideo();
+                      }
+                    }}
                     placeholder="Paste Webtoon episode viewer URL (e.g. webtoons.com/...)"
                     className="relative w-full bg-neutral-950 border border-neutral-800 rounded-xl px-4 py-3.5 text-sm text-neutral-200 outline-none placeholder:text-neutral-600 focus:border-purple-500 transition-colors"
                   />
                 </div>
-              </div>
-
-              {/* CLICKABLE PRESET BADGES */}
-              <div className="flex flex-wrap items-center gap-2 text-xs font-mono text-neutral-500">
-                <span className="font-bold">Quick Presets:</span>
-                {SAMPLE_PRESETS.map((preset) => (
-                  <button
-                    key={preset.name}
-                    type="button"
-                    onClick={() => {
-                      setTargetUrl(preset.url);
-                      setConsoleLogs(prev => [
-                        `[GUI] Loaded test sample preset for ${preset.name}`,
-                        ...prev
-                      ]);
-                    }}
-                    className={`px-2.5 py-1 rounded-lg border text-[11px] font-sans font-medium transition-all cursor-pointer ${
-                      targetUrl === preset.url
-                        ? "bg-purple-950/40 border-purple-500 text-purple-300"
-                        : "bg-neutral-950 border-neutral-850 text-neutral-400 hover:text-neutral-200"
-                    }`}
-                  >
-                    {preset.name}
-                  </button>
-                ))}
               </div>
             </div>
 
