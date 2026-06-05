@@ -17,6 +17,7 @@ import {
 
 import { GeneratedPanel, SAMPLE_PRESETS } from "./types";
 import { parseWebtoonUrl } from "./utils";
+import { AI_MODELS } from "./models";
 
 // Child Components
 import Header from "./components/Header";
@@ -27,13 +28,30 @@ import VolumeAndProgressPanel from "./components/VolumeAndProgressPanel";
 import ImageEnhancer from "./components/ImageEnhancer";
 import CropEditorModal from "./components/CropEditorModal";
 import TerminalLogs from "./components/TerminalLogs";
+import ModelStatusTable from "./components/ModelStatusTable";
+import NotificationStack, { Notification, NotificationType } from "./components/NotificationStack";
 
 export default function App() {
   // Input parameters
   const [targetUrl, setTargetUrl] = useState<string>("");
+  // ... (add state for notifications)
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+
+  const addNotification = (message: string, type: NotificationType) => {
+    const id = Date.now();
+    setNotifications(prev => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setNotifications(prev => prev.filter(n => n.id !== id));
+    }, 5000);
+  };
+
+  const removeNotification = (id: number) => {
+    setNotifications(prev => prev.filter(n => n.id !== id));
+  };
   const [voiceActor, setVoiceActor] = useState<string>("Standard Comic Narrator (Male)");
   const [musicTheme, setMusicTheme] = useState<string>("Orchestral Battle Theme");
   const [aspectRatio, setAspectRatio] = useState<"9:16" | "16:9">("9:16");
+  const [selectedModel, setSelectedModel] = useState<string>(AI_MODELS[0].id);
   const [frameRate, setFrameRate] = useState<number>(24);
   const [volume, setVolume] = useState<number>(80);
   const [isMuted, setIsMuted] = useState<boolean>(false);
@@ -113,7 +131,7 @@ export default function App() {
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ url: targetUrl })
+      body: JSON.stringify({ url: targetUrl, model: selectedModel })
     })
       .then(res => {
         if (!isCurrent) throw new Error("Stale request cleanup");
@@ -311,7 +329,7 @@ export default function App() {
     setConsoleLogs([
       `[Control] Initiating dynamic production pipeline request...`,
       `[Control] Webtoon Destination target: ${targetUrl}`,
-      `[Control] Cinematic parameters applied -> FPS: ${frameRate} | Actor: ${voiceActor} | Audio: ${musicTheme}`
+      `[Control] Cinematic parameters applied -> FPS: ${frameRate} | Actor: ${voiceActor} | Audio: ${musicTheme} | Model: ${selectedModel}`
     ]);
 
     try {
@@ -321,7 +339,8 @@ export default function App() {
       const requestBody = {
         url: targetUrl,
         episode_id: `wp_${Math.random().toString(36).substring(2, 8)}`,
-        panels: panels // Send currently customized/visible panel settings so backend compiles edits!
+        panels: panels,
+        model: selectedModel
       };
 
       // Real fetch endpoint integration targeting local app server
@@ -356,7 +375,14 @@ export default function App() {
       
     } catch (err: any) {
       console.error("Pipeline failure:", err);
-      const errMessage = err.message || "An unexpected connection error occurred. Please verify backend state.";
+
+      let errMessage = err.message || "An unexpected connection error occurred.";
+
+      // Check specifically for rate limiting (429)
+      if (errMessage.includes("429") || errMessage.includes("quota")) {
+        errMessage = "You've exceeded your daily/request quota for the Gemini API. Please wait a short while for the quota to reset, or check your billing plan in Google AI Studio to increase your limits.";
+      }
+
       setErrorLog(errMessage);
       setConsoleLogs(prev => [
         ...prev,
@@ -634,13 +660,13 @@ export default function App() {
       />
 
       {/* WORKSPACE AREA */}
-      <main id="main_workspace" className="flex-1 w-full max-w-7xl mx-auto px-4 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+      <main id="main_workspace" className="flex-1 w-full max-w-7xl mx-auto px-6 py-10 grid grid-cols-1 lg:grid-cols-12 gap-10 items-start">
         
         {/* LEFT COLUMN: SOURCE INTEGRATION */}
-        <div id="controls_column" className="lg:col-span-7 flex flex-col gap-6">
+        <div id="controls_column" className="lg:col-span-7 flex flex-col gap-8">
           
           {/* CONVERSION INPUT CARD */}
-          <div id="dynamic_input_box" className="bg-neutral-900/60 rounded-2xl border border-neutral-800 p-6 backdrop-blur space-y-6">
+          <div id="dynamic_input_box" className="bg-neutral-900/40 rounded-3xl border border-neutral-800/80 p-8 backdrop-blur-md shadow-sm space-y-6">
             <div className="space-y-1">
               <div className="flex items-center gap-2 text-purple-400">
                 <Sparkles className="h-4 w-4" />
@@ -652,33 +678,18 @@ export default function App() {
               </p>
             </div>
 
-            {/* URL Inputs */}
-            <div className="space-y-3">
-              <div className="relative group">
-                <div className="absolute -inset-0.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 opacity-20 blur group-focus-within:opacity-40 transition-opacity duration-300" />
-                <div className="relative flex flex-col sm:flex-row gap-2">
+              {/* URL Inputs + Model Selection */}
+              <div className="space-y-4">
+                <div className="relative group">
+                  <div className="absolute -inset-0.5 rounded-xl bg-gradient-to-r from-purple-600 to-indigo-600 opacity-20 blur group-focus-within:opacity-40 transition-opacity duration-300" />
                   <input 
                     id="target_url_input"
                     type="url" 
                     value={targetUrl}
                     onChange={(e) => setTargetUrl(e.target.value.trim())}
                     placeholder="Paste Webtoon episode viewer URL (e.g. webtoons.com/...)"
-                    className="flex-1 bg-neutral-950 border border-neutral-800 rounded-xl px-4 py-3.5 text-sm text-neutral-200 outline-none placeholder:text-neutral-600 focus:border-purple-500 transition-colors"
+                    className="relative w-full bg-neutral-950 border border-neutral-800 rounded-xl px-4 py-3.5 text-sm text-neutral-200 outline-none placeholder:text-neutral-600 focus:border-purple-500 transition-colors"
                   />
-                  
-                  <button
-                    id="btn_generate_pipeline"
-                    onClick={handleGenerateVideo}
-                    disabled={isProcessing || !targetUrl.trim()}
-                    className="bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-medium px-6 py-3.5 rounded-xl flex items-center justify-center gap-2 shrink-0 select-none shadow-lg shadow-purple-950/40 transition-all cursor-pointer hover:scale-[1.01] active:scale-95 duration-150"
-                  >
-                    {isProcessing ? (
-                      <RefreshCw className="h-4 w-4 animate-spin text-white" />
-                    ) : (
-                      <Cpu className="h-4 w-4" />
-                    )}
-                    <span>Generate Video</span>
-                  </button>
                 </div>
               </div>
 
@@ -739,6 +750,7 @@ export default function App() {
             setEditCropLeft={setEditCropLeft}
             setEditCropRight={setEditCropRight}
             setEditAutoTrim={setEditAutoTrim}
+            addNotification={addNotification}
           />
 
           {/* ACTIVE QUEUE / LIVE PIPELINE PROGRESS */}
@@ -780,11 +792,8 @@ export default function App() {
             hasScrapedImages={scrapedImages.length > 0}
           />
 
-        </div>
-
         {/* RIGHT COLUMN: INTEGRATED CINEMA PLAYER */}
         <div id="cinema_column" className="lg:col-span-5 flex flex-col gap-6 sticky top-24">
-          
           <VideoMonitor
             activePreviewTab={activePreviewTab}
             setActivePreviewTab={setActivePreviewTab}
@@ -823,6 +832,8 @@ export default function App() {
               setConsoleLogs={setConsoleLogs}
             />
           )}
+
+          <ModelStatusTable />
 
           {/* METADATA RENDER MATRIX */}
           <div id="video_metadata_panel" className="bg-neutral-900/40 rounded-2xl border border-neutral-800/80 p-5 space-y-3.5">
@@ -865,9 +876,7 @@ export default function App() {
               </div>
             )}
           </div>
-
         </div>
-
       </main>
 
       {/* FOOTER */}
@@ -895,8 +904,9 @@ export default function App() {
         handleSaveEditedImage={handleSaveEditedImage}
         handleSaveMultipleCuts={handleSaveMultipleCuts}
         setConsoleLogs={setConsoleLogs}
+        addNotification={addNotification}
       />
-
+      <NotificationStack notifications={notifications} removeNotification={removeNotification} />
     </div>
   );
 }

@@ -66,7 +66,7 @@ export default function VideoMonitor({
       </div>
 
       {/* ACTIVE VIEWPORT FRAME */}
-      <div id="video_monitor_outer_wrapper" className="relative bg-neutral-950 border border-neutral-800 rounded-2xl overflow-hidden shadow-2xl flex items-center justify-center p-3 min-h-[400px]">
+      <div id="video_monitor_outer_wrapper" className="relative bg-neutral-950/40 border border-neutral-800/80 rounded-3xl overflow-hidden shadow-inner flex items-center justify-center p-4 min-h-[440px]">
         
         {/* Ambient Background Glow */}
         <div className="absolute h-56 w-56 rounded-full bg-purple-600/10 blur-3xl" />

@@ -2,6 +2,7 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI, Type } from "@google/genai";
+import { HfInference } from "@huggingface/inference";
 import dotenv from 'dotenv';
 import imageSize from 'image-size';
 import sharp from 'sharp';
@@ -30,8 +31,15 @@ if (process.env.GEMINI_API_KEY) {
   } catch (err) {
     console.error('Failed to initialize Gemini Client:', err);
   }
+}
+
+// Initialize HuggingFace client lazily
+let hf: HfInference | null = null;
+if (process.env.HUGGINGFACE_API_KEY) {
+    hf = new HfInference(process.env.HUGGINGFACE_API_KEY);
+    console.log('HuggingFace Inference client successfully initialized.');
 } else {
-  console.log('No GEMINI_API_KEY detected in env variables. Storyboard will utilize premium local fallbacks.');
+    console.log('No HUGGINGFACE_API_KEY detected.');
 }
 
 // Curated Dynamic Ambient Background Loops mapped by Genre
@@ -632,13 +640,13 @@ app.post("/api/edit-image", async (req, res) => {
     // 2. Fallback fetch if not in stitched cache
     if (!imgBuffer) {
       let directUrl = url;
-      if (url.includes("/api/proxy-image")) {
-        const matched = url.match(/[?&]url=([^&]+)/);
+      if (directUrl.includes("/api/proxy-image")) {
+        const matched = directUrl.match(/[?&]url=([^&]+)/);
         if (matched && matched[1]) {
           directUrl = decodeURIComponent(matched[1]);
         }
       }
-
+      
       if (directUrl.startsWith("/")) {
         directUrl = `http://localhost:3000${directUrl}`;
       }
@@ -729,6 +737,133 @@ app.post("/api/undo-crop", (req, res) => {
   });
 });
 
+// Endpoint to use AI to detect panel crops
+app.post("/api/ai-detect-panels", async (req, res) => {
+  const { url, model } = req.body;
+  if (!url) {
+    return res.status(400).json({ error: "Parameter 'url' is required." });
+  }
+
+  let base64Image = "";
+  try {
+    // 1. Fetch image
+    const headers = {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+      "Referer": "https://www.webtoons.com/"
+    };
+    
+    let directUrl = url;
+    if (url.includes("/api/proxy-image")) {
+      const matched = url.match(/[?&]url=([^&]+)/);
+      if (matched && matched[1]) {
+        directUrl = decodeURIComponent(matched[1]);
+      }
+    }
+    if (directUrl.startsWith("/")) {
+      directUrl = `http://localhost:3000${directUrl}`;
+    }
+
+    const fetchResponse = await fetch(directUrl, { headers });
+    if (!fetchResponse.ok) {
+      throw new Error(`Failed to fetch image for AI analysis: ${fetchResponse.statusText}`);
+    }
+    const buffer = await fetchResponse.arrayBuffer();
+    
+    base64Image = Buffer.from(buffer).toString("base64");
+    
+    // 2. Call Gemini
+    if (!ai) {
+      throw new Error("Gemini AI client not initialized.");
+    }
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: {
+        parts: [
+          {
+            inlineData: {
+              mimeType: "image/jpeg",
+              data: base64Image,
+            },
+          },
+          {
+            text: "Analyze this comic image. Tell me the coordinates (top, bottom, left, right in percentage 0-100) that correctly crop and cut the comic panel, removing any extra whitespace or borders. Return a JSON array of objects, one for each panel, with properties: cropTop, cropBottom, cropLeft, cropRight.",
+          },
+        ],
+      },
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              cropTop: { type: Type.NUMBER },
+              cropBottom: { type: Type.NUMBER },
+              cropLeft: { type: Type.NUMBER },
+              cropRight: { type: Type.NUMBER },
+            },
+            required: ["cropTop", "cropBottom", "cropLeft", "cropRight"],
+          },
+        },
+      },
+    });
+
+    const text = response.text || "[]";
+    const panels = JSON.parse(text.trim());
+    return res.json({ success: true, panels });
+  } catch (err: any) {
+    if (err.status === 429) {
+      console.warn("[AI Detect API] Quota limit reached, waiting to retry once...");
+      await new Promise(resolve => setTimeout(resolve, 5000));
+      const base64ImageForRetry = base64Image;
+      try {
+        const response = await ai.models.generateContent({
+           model: "gemini-3.5-flash",
+           contents: {
+             parts: [
+               {
+                 inlineData: {
+                   mimeType: "image/jpeg",
+                   data: base64ImageForRetry,
+                 },
+               },
+               {
+                 text: "Analyze this comic image. Tell me the coordinates (top, bottom, left, right in percentage 0-100) that correctly crop and cut the comic panel, removing any extra whitespace or borders. Return a JSON array of objects, one for each panel, with properties: cropTop, cropBottom, cropLeft, cropRight.",
+               },
+             ],
+           },
+           config: {
+             responseMimeType: "application/json",
+             responseSchema: {
+               type: Type.ARRAY,
+               items: {
+                 type: Type.OBJECT,
+                 properties: {
+                   cropTop: { type: Type.NUMBER },
+                   cropBottom: { type: Type.NUMBER },
+                   cropLeft: { type: Type.NUMBER },
+                   cropRight: { type: Type.NUMBER },
+                 },
+                 required: ["cropTop", "cropBottom", "cropLeft", "cropRight"],
+               },
+             },
+           },
+        });
+
+        const text = response.text || "[]";
+        const panels = JSON.parse(text.trim());
+        return res.json({ success: true, panels });
+      } catch (retryErr) {
+        console.warn("[AI Detect API] Retry failed, falling back to local detection", retryErr);
+      }
+    }
+    
+    console.error("[AI Detect API] Complete error details:", err);
+    return res.status(500).json({ error: `AI analysis failed: ${err.message || 'Unknown error'}` });
+  }
+});
+
 // Endpoint to run OpenCV panel contours-detection pass on the image
 app.post("/api/detect-panels", async (req, res) => {
   const { url, sensitivity = 30 } = req.body;
@@ -747,80 +882,11 @@ app.post("/api/detect-panels", async (req, res) => {
       const data = await response.json();
       return res.json(data);
     }
-    throw new Error(`Python FastAPI returned status ${response.status}`);
+    const errorText = await response.text();
+    throw new Error(`Python FastAPI returned status ${response.status}: ${errorText}`);
   } catch (err: any) {
-    console.warn("[Express Proxy] Failed to contact FastAPI detect-panels, using smart layout fallback:", err.message);
-    
-    try {
-      let imgBuffer: Buffer | null = null;
-      let contentType = "image/jpeg";
-
-      if (url.includes("/api/stitch-images/cached/")) {
-        const idMatched = url.match(/\/api\/stitch-images\/cached\/([^\/\s\?&]+)/);
-        if (idMatched && idMatched[1]) {
-          const cached = stitchedCache.get(idMatched[1]);
-          if (cached) {
-            imgBuffer = cached.data;
-            contentType = cached.contentType;
-          }
-        }
-      }
-
-      if (!imgBuffer) {
-        let directUrl = url;
-        if (url.includes("/api/proxy-image")) {
-          const matched = url.match(/[?&]url=([^&]+)/);
-          if (matched && matched[1]) {
-            directUrl = decodeURIComponent(matched[1]);
-          }
-        }
-
-        if (directUrl.startsWith("/")) {
-          directUrl = `http://localhost:3000${directUrl}`;
-        }
-
-        const headers = {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, http://6522158271.asia-southeast1.run.app) Chrome/120.0.0.0 Safari/537.36",
-          "Referer": "https://www.webtoons.com/"
-        };
-        
-        const fetchResponse = await fetch(directUrl, { headers });
-        if (!fetchResponse.ok) {
-          throw new Error(`Failed to fetch original image for analysis: ${fetchResponse.statusText}`);
-        }
-        imgBuffer = Buffer.from(await fetchResponse.arrayBuffer());
-      }
-
-      const detectedSlices = await detectPanelSubdivisions(imgBuffer, sensitivity);
-      const panels = detectedSlices.map(s => ({
-        cropTop: s.topPercent,
-        cropBottom: s.bottomPercent,
-        cropLeft: 2.0,
-        cropRight: 2.0,
-        width: 800,
-        height: Math.round(s.heightPercent * 10),
-        area: 320000
-      }));
-
-      return res.json({
-        success: true,
-        panels,
-        message: `Detected ${panels.length} panels organically using express-side average row luminosity threshold algorithm.`
-      });
-    } catch (fallbackError: any) {
-      console.error("[Express Proxy Fallback] Subdivisions failed:", fallbackError);
-      
-      const panels = [
-        { cropTop: 0.0, cropBottom: 68.0, cropLeft: 2.0, cropRight: 2.0, width: 800, height: 400, area: 320000 },
-        { cropTop: 34.0, cropBottom: 34.0, cropLeft: 2.0, cropRight: 2.0, width: 800, height: 400, area: 320000 },
-        { cropTop: 68.0, cropBottom: 0.0, cropLeft: 2.0, cropRight: 2.0, width: 800, height: 400, area: 320000 }
-      ];
-      return res.json({
-        success: true,
-        panels,
-        message: "Contact failed and local analysis crashed, used standard 3-slice mock grid."
-      });
-    }
+    console.error("[Express Proxy] Failed to contact FastAPI detect-panels:", err.message);
+    return res.status(err.status || 500).json({ error: `AI panel detection service: ${err.message}` });
   }
 });
 
@@ -1192,13 +1258,9 @@ async function scrapeImagesFromUrl(url: string): Promise<string[]> {
 }
 
 // Helper function to generate rich story dialogs/captions dynamically without hardcoding
-async function generateDynamicPanels(title: string, genre: string, episode: string, imgUrls: string[]): Promise<any[]> {
+async function generateDynamicPanels(title: string, genre: string, episode: string, imgUrls: string[], model: string): Promise<any[]> {
   const activeSlicesCount = Math.min(imgUrls.length, 8);
-  
-  if (ai) {
-    try {
-      console.log(`[Gemini] Creating initial storyboard step scripts for "${title}" - "${episode}" (${genre})`);
-      const prompt = `You are a cinematic comic book editor and storyteller. 
+  const prompt = `You are a cinematic comic book editor and storyteller.
 Given this Comic Webtoon information:
 Title: "${title}"
 Genre: "${genre}"
@@ -1206,21 +1268,47 @@ Episode: "${episode}"
 
 Please generate exactly ${activeSlicesCount} distinct chronological narration or panel speech lines.
 For each of the ${activeSlicesCount} panels, provide:
-1. "speech_text": An engaging, atmospheric description, narration, or character dialogue matching the flow of the story. Use details from "${title}" or the setting of "${genre}" (e.g. if romance, speak of intimate moments; if action, speak of hunters or epic fights; if fantasy, speak of magic stars). Keep under 20 words.
-2. "sfx": A punchy comic-style sound effect in brackets, e.g. "[Whoosh]", "[Slam]", "[Chime]", "[Glow]", "[Thud]".
-3. "motion_type": One of 'zoom_in', 'zoom_out', 'pan_left', 'pan_right', 'pan_up', 'pan_down'. Make the camera movements flow together.
+1. "speech_text": An engaging, atmospheric description (under 20 words).
+2. "sfx": A punchy comic-style sound effect in brackets.
+3. "motion_type": One of 'zoom_in', 'zoom_out', 'pan_left', 'pan_right', 'pan_up', 'pan_down'.
 
-Output strictly valid JSON conforming to this schema:
-{
-  "panels": [
-    {
-      "speech_text": "text",
-      "sfx": "[sound]",
-      "motion_type": "motion_type"
+Output strictly valid JSON with top-level key "panels".`;
+
+  if (model.startsWith('huggingface') && hf) {
+    try {
+      console.log(`[HuggingFace] Creating storyboard using Mistral 7B for "${title}"`);
+      const response = await hf.chatCompletion({
+        model: 'mistralai/Mistral-7B-Instruct-v0.3',
+        messages: [{ role: 'user', content: prompt }],
+        temperature: 0.7,
+        max_tokens: 1000,
+      });
+
+      const responseText = response.choices[0].message.content || "";
+      const parsedAI = JSON.parse(responseText.replace(/```json/g, '').replace(/```/g, '').trim());
+      if (parsedAI && Array.isArray(parsedAI.panels)) {
+          return parsedAI.panels.slice(0, activeSlicesCount).map((p: any, idx: number) => ({
+              id: idx + 1,
+              image_url: imgUrls[idx],
+              original_image_url: imgUrls[idx],
+              speech_text: p.speech_text || `Scene ${idx + 1}`,
+              sfx: p.sfx || "[Action]",
+              duration: 5.0,
+              motion_type: p.motion_type || "zoom_in"
+          }));
+      }
+    } catch (e: any) {
+      // If it's a permission issue, fall back silently as Gemini handles it
+      if (e.message && e.message.includes("sufficient permissions")) {
+          console.log('[HuggingFace] Inference Provider permission denied. Falling back silently to Gemini.');
+      } else {
+        console.warn('HuggingFace failed, falling back...', e);
+      }
     }
-  ]
-}`;
+  }
 
+  if (ai) {
+    try {
       const aiResponse = await ai.models.generateContent({
         model: "gemini-3.5-flash",
         contents: prompt,
@@ -1263,8 +1351,59 @@ Output strictly valid JSON conforming to this schema:
           }));
         }
       }
-    } catch (err) {
-      console.warn("[Gemini Script] Storyboard automatic generation failed, falling back to programmatic narrator.", err);
+    } catch (err: any) {
+      if (err.status === 429) {
+        console.warn("[Gemini Script] Quota limit reached, waiting to retry once...");
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        try {
+          const aiResponse = await ai.models.generateContent({
+            model: "gemini-3.5-flash",
+            contents: prompt,
+            config: {
+              responseMimeType: "application/json",
+              responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                  panels: {
+                    type: Type.ARRAY,
+                    items: {
+                      type: Type.OBJECT,
+                      properties: {
+                        speech_text: { type: Type.STRING },
+                        sfx: { type: Type.STRING },
+                        motion_type: { type: Type.STRING }
+                      },
+                      required: ["speech_text", "sfx", "motion_type"]
+                    }
+                  }
+                },
+                required: ["panels"]
+              }
+            }
+          });
+
+          const responseText = aiResponse.text?.trim() || "";
+          if (responseText) {
+            const parsedAI = JSON.parse(responseText);
+            if (parsedAI && Array.isArray(parsedAI.panels) && parsedAI.panels.length > 0) {
+              console.log(`[Gemini] Storyboard narration generated successfully on retry for ${activeSlicesCount} slices.`);
+              return parsedAI.panels.slice(0, activeSlicesCount).map((p: any, idx: number) => ({
+                id: idx + 1,
+                image_url: imgUrls[idx],
+                original_image_url: imgUrls[idx],
+                speech_text: p.speech_text || `Scene ${idx + 1} of ${title}`,
+                sfx: p.sfx || "[Action Sounds]",
+                duration: 4.5,
+                motion_type: p.motion_type || "zoom_in"
+              }));
+            }
+          }
+        } catch (retryErr) {
+          console.warn("[Gemini Script] Retry also failed. Falling back to programmatic narrator.", retryErr);
+        }
+      } else {
+        console.warn("[Gemini Script] Storyboard automatic generation failed, falling back to programmatic narrator.", err);
+      }
     }
   }
 
@@ -1315,7 +1454,7 @@ Output strictly valid JSON conforming to this schema:
 
 // Live viewer scraper to isolate all images from a pasted Webtoons URL
 app.post("/api/scrape-images", async (req, res) => {
-  const { url } = req.body;
+  const { url, model } = req.body;
   if (!url) {
     return res.status(400).json({ error: "No URL provided" });
   }
@@ -1324,7 +1463,7 @@ app.post("/api/scrape-images", async (req, res) => {
     const parsed = parseWebtoonUrl(url);
     console.log(`[Scraper] Parsing page resource via helper: ${url}`);
     const proxiedUrls = await scrapeImagesFromUrl(url);
-    const dynamicPanels = await generateDynamicPanels(parsed.title, parsed.genre, parsed.episode, proxiedUrls);
+    const dynamicPanels = await generateDynamicPanels(parsed.title, parsed.genre, parsed.episode, proxiedUrls, model);
 
     return res.json({
       success: true,
@@ -1349,36 +1488,37 @@ app.post("/api/scrape-images", async (req, res) => {
 
 // Primary Endpoint: Generate Storyboard and Cinematic parameters using AI / fallsback
 app.post("/api/generate", async (req, res) => {
-  const { url, episode_id, panels: clientPanels, custom_background_video } = req.body;
-  
-  if (!url) {
-    return res.status(400).json({ detail: "A target Webtoon URL is required." });
-  }
+  try {
+    const { url, episode_id, panels: clientPanels, custom_background_video, model } = req.body;
+    
+    if (!url) {
+      return res.status(400).json({ detail: "A target Webtoon URL is required." });
+    }
 
-  // Parse details dynamically from the URL itself, no more hardcoded arrays
-  const parsed = parseWebtoonUrl(url);
-  const projectId = episode_id || `project_${Math.random().toString(36).substring(2, 8)}`;
-  
-  console.log(`Processing storyboard request for url: "${url}". Parsed Title: "${parsed.title}", Genre: "${parsed.genre}"`);
+    // Parse details dynamically from the URL itself, no more hardcoded arrays
+    const parsed = parseWebtoonUrl(url);
+    const projectId = episode_id || `project_${Math.random().toString(36).substring(2, 8)}`;
+    
+    console.log(`Processing storyboard request for url: "${url}". Parsed Title: "${parsed.title}", Genre: "${parsed.genre}"`);
 
-  // Choose the background ambient loop video dynamically
-  let videoUrl = DYNAMIC_BACKGROUND_VIDEOS.general;
-  const genreLower = parsed.genre.toLowerCase();
-  
-  if (custom_background_video) {
-    videoUrl = custom_background_video;
-  } else if (genreLower.includes('action') || genreLower.includes('martial') || genreLower.includes('hero') || genreLower.includes('solo')) {
-    videoUrl = DYNAMIC_BACKGROUND_VIDEOS.action;
-  } else if (genreLower.includes('romance') || genreLower.includes('love') || genreLower.includes('slice') || genreLower.includes('drama') || genreLower.includes('olympus')) {
-    videoUrl = DYNAMIC_BACKGROUND_VIDEOS.romance;
-  } else if (genreLower.includes('fantasy') || genreLower.includes('magic') || genreLower.includes('tower') || genreLower.includes('god')) {
-    videoUrl = DYNAMIC_BACKGROUND_VIDEOS.fantasy;
-  } else if (genreLower.includes('cyber') || genreLower.includes('sci') || genreLower.includes('thriller') || genreLower.includes('tech')) {
-    videoUrl = DYNAMIC_BACKGROUND_VIDEOS.cyberpunk;
-  }
+    // Choose the background ambient loop video dynamically
+    let videoUrl = DYNAMIC_BACKGROUND_VIDEOS.general;
+    const genreLower = parsed.genre.toLowerCase();
+    
+    if (custom_background_video) {
+        videoUrl = custom_background_video;
+    } else if (genreLower.includes('action') || genreLower.includes('martial') || genreLower.includes('hero') || genreLower.includes('solo')) {
+        videoUrl = DYNAMIC_BACKGROUND_VIDEOS.action;
+    } else if (genreLower.includes('romance') || genreLower.includes('love') || genreLower.includes('slice') || genreLower.includes('drama') || genreLower.includes('olympus')) {
+        videoUrl = DYNAMIC_BACKGROUND_VIDEOS.romance;
+    } else if (genreLower.includes('fantasy') || genreLower.includes('magic') || genreLower.includes('tower') || genreLower.includes('god')) {
+        videoUrl = DYNAMIC_BACKGROUND_VIDEOS.fantasy;
+    } else if (genreLower.includes('cyber') || genreLower.includes('sci') || genreLower.includes('thriller') || genreLower.includes('tech')) {
+        videoUrl = DYNAMIC_BACKGROUND_VIDEOS.cyberpunk;
+    }
 
-  // Retrieve the actual webtoon image list to map true episode scenes to the storyboard panels
-  const scrapedUrls = await scrapeImagesFromUrl(url);
+    // Retrieve the actual webtoon image list to map true episode scenes to the storyboard panels
+    const scrapedUrls = await scrapeImagesFromUrl(url);
 
   // 1. If the client has already customized the panels in the frontend, preserve them entirely and resolve placeholders!
   if (clientPanels && Array.isArray(clientPanels) && clientPanels.length > 0) {
@@ -1411,9 +1551,7 @@ app.post("/api/generate", async (req, res) => {
 
   // Attempt to invoke Gemini API for a highly personalized customized script story
   if (ai) {
-    try {
-      console.log('Sending prompt to Gemini models to generate immersive custom script...');
-      const prompt = `You are an elite cinematic manga/manhwa video director. 
+    const prompt = `You are an elite cinematic manga/manhwa video director. 
 Read the comic info derived from this Webtoon URL:
 Title: "${parsed.title}"
 Genre: "${parsed.genre}"
@@ -1439,10 +1577,11 @@ You MUST return the output STRICTLY as a JSON array inside the 'panels' field of
     }
   ]
 }`;
-
+    try {
+      console.log('Sending prompt to Gemini models to generate immersive custom script...');
       const aiResponse = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: prompt,
+        model: "gemini-2.5-flash",
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
         config: {
           responseMimeType: "application/json",
           responseSchema: {
@@ -1489,8 +1628,65 @@ You MUST return the output STRICTLY as a JSON array inside the 'panels' field of
           });
         }
       }
-    } catch (aiErr) {
-      console.warn('Gemini custom script generation failed, falling back to dynamic search patterns.', aiErr);
+    } catch (aiErr: any) {
+      if (aiErr.status === 429) {
+        console.warn("[Gemini Script] Quota limit reached, waiting to retry once...");
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        try {
+          const aiResponse = await ai.models.generateContent({
+             model: "gemini-2.5-flash",
+             contents: [{ role: 'user', parts: [{ text: prompt }] }],
+             config: {
+               responseMimeType: "application/json",
+               responseSchema: {
+                 type: Type.OBJECT,
+                 properties: {
+                   panels: {
+                     type: Type.ARRAY,
+                     items: {
+                       type: Type.OBJECT,
+                       properties: {
+                         speech_text: { type: Type.STRING },
+                         sfx: { type: Type.STRING },
+                         motion_type: { type: Type.STRING },
+                         duration: { type: Type.NUMBER },
+                         image_search_prompt: { type: Type.STRING }
+                       },
+                       required: ["speech_text", "sfx", "motion_type", "duration", "image_search_prompt"]
+                     }
+                   }
+                 },
+                 required: ["panels"]
+               }
+             }
+          });
+          const responseText = aiResponse.text?.trim() || '';
+          if (responseText) {
+            const parsedAI = JSON.parse(responseText);
+            if (parsedAI && Array.isArray(parsedAI.panels) && parsedAI.panels.length > 0) {
+              console.log(`Gemini successfully generated ${parsedAI.panels.length} customized story panels on retry.`);
+              responsePanels = parsedAI.panels.map((p: any, idx: number) => {
+                let imgUrl = `data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='800' height='600' viewBox='0 0 800 600'><rect width='100%' height='100%' fill='%230f0f11'/><text x='50%25' y='50%25' fill='%233f3f46' font-family='sans-serif' font-weight='bold' font-size='20' text-anchor='middle' dominant-baseline='middle'>Scene Frame Awaiting Source</text></svg>`;
+                if (scrapedUrls && scrapedUrls.length > 0) {
+                  imgUrl = scrapedUrls[idx % scrapedUrls.length];
+                }
+                return {
+                  id: idx + 1,
+                  speech_text: p.speech_text || `Scene ${idx + 1}`,
+                  sfx: p.sfx || "[Spectacular Sound]",
+                  duration: Number(p.duration) || 5.0,
+                  motion_type: p.motion_type || "zoom_in",
+                  image_url: imgUrl
+                };
+              });
+            }
+          }
+        } catch (retryErr) {
+          console.warn('Gemini custom script generation failed on retry. Falling back.', retryErr);
+        }
+      } else {
+        console.warn('Gemini custom script generation failed, falling back to dynamic search patterns.', aiErr);
+      }
     }
   }
 
@@ -1529,6 +1725,10 @@ You MUST return the output STRICTLY as a JSON array inside the 'panels' field of
     message: `Webtoon ${parsed.title} animation compilation created dynamically.`,
     panels: responsePanels
   });
+} catch (err: any) {
+  console.error("[API Generate Error]", err);
+  res.status(500).json({ error: err.message || "An unexpected error occurred during generation." });
+}
 });
 
 // Legacy backward-compatibility endpoint

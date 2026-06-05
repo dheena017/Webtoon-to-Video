@@ -9,9 +9,13 @@ import {
   Check, 
   Scissors, 
   Trash,
-  Sliders
+  Sliders,
+  Brain,
+  X
 } from "lucide-react";
 import { GeneratedPanel } from "../types";
+
+import { NotificationType } from "./NotificationStack";
 
 interface LiveScraperDeckProps {
   scrapedImages: string[];
@@ -31,6 +35,7 @@ interface LiveScraperDeckProps {
   setEditCropLeft: (val: number) => void;
   setEditCropRight: (val: number) => void;
   setEditAutoTrim: (val: boolean) => void;
+  addNotification: (message: string, type: NotificationType) => void;
 }
 
 export default function LiveScraperDeck({
@@ -50,9 +55,12 @@ export default function LiveScraperDeck({
   setEditCropBottom,
   setEditCropLeft,
   setEditCropRight,
-  setEditAutoTrim
+  setEditAutoTrim,
+  addNotification
 }: LiveScraperDeckProps) {
   const [isBatchCropping, setIsBatchCropping] = React.useState<boolean>(false);
+  const [isAiCropping, setIsAiCropping] = React.useState<boolean>(false);
+  const [isAiEnabled, setIsAiEnabled] = React.useState<boolean>(false);
   const [cropSensitivity, setCropSensitivity] = React.useState<number>(30); // 5 to 90 threshold
   const [cropPaddingPx, setCropPaddingPx] = React.useState<number>(10); // 0 to 50px borders
   const [cropBackgroundMode, setCropBackgroundMode] = React.useState<string>("auto"); // 'auto', 'white', 'black'
@@ -60,6 +68,103 @@ export default function LiveScraperDeck({
   const [showAutoCropSettings, setShowAutoCropSettings] = React.useState<boolean>(false);
 
   if (!isScraping && scrapedImages.length === 0) return null;
+
+  const handleAiCropSelected = async () => {
+    if (selectedScraped.length === 0) return;
+    setIsAiCropping(true);
+    setConsoleLogs(prev => [
+      `[AI Auto Cropper] Starting AI-powered panel analysis for ${selectedScraped.length} assets...`,
+      ...prev
+    ]);
+
+    try {
+      let updatedImages = [...scrapedImages];
+      let updatedSelected = [...selectedScraped];
+
+      for (const imgUrl of selectedScraped) {
+        setConsoleLogs(prev => [
+          `[Auto Cropper] Analyzing structure for: ${imgUrl.substring(imgUrl.lastIndexOf('/') + 1, 65)}...`,
+          ...prev
+        ]);
+        
+        try {
+          const detectRes = await fetch("/api/ai-detect-panels", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ url: imgUrl })
+          });
+          
+          if (!detectRes.ok) {
+            throw new Error(`AI panel parsing failed (status ${detectRes.status})`);
+          }
+          
+          const detectData = await detectRes.json();
+          if (detectData.quotaExceeded) {
+            setIsAiEnabled(false);
+            setConsoleLogs(prev => ["[AI Auto Cropper] Quota exceeded. AI disabled.", ...prev]);
+            throw new Error("Quota exceeded");
+          }
+          
+          if (detectData.success && detectData.panels && detectData.panels.length > 0) {
+            // Apply the first found crop from AI
+            const box = detectData.panels[0];
+            
+            const cropRes = await fetch("/api/edit-image", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                url: imgUrl,
+                cropTop: box.cropTop,
+                cropBottom: box.cropBottom,
+                cropLeft: box.cropLeft,
+                cropRight: box.cropRight,
+                autoTrim: false
+              })
+            });
+            
+            if (cropRes.ok) {
+              const cropData = await cropRes.json();
+              if (cropData.success && cropData.url) {
+                const idx = updatedImages.indexOf(imgUrl);
+                updatedImages[idx] = cropData.url;
+                
+                const selIdx = updatedSelected.indexOf(imgUrl);
+                if (selIdx !== -1) {
+                  updatedSelected[selIdx] = cropData.url;
+                }
+                
+                setPanels(prevPanels => 
+                  prevPanels.map(p => p.image_url === imgUrl ? { ...p, image_url: cropData.url } : p)
+                );
+              } else {
+                throw new Error("Failed to apply crop");
+              }
+            } else {
+              throw new Error("Failed to apply crop");
+            }
+          }
+        } catch (err: any) {
+          throw err;
+        }
+      }
+      
+      setScrapedImages(updatedImages);
+      setSelectedScraped(updatedSelected);
+      setConsoleLogs(prev => [
+        `[AI Auto Cropper] Successfully completed AI layout analysis!`,
+        ...prev
+      ]);
+      
+    } catch (err: any) {
+      setConsoleLogs(prev => [
+        `[AI Auto Cropper ERROR] AI analysis failed: ${err.message || err}`,
+        ...prev
+      ]);
+      addNotification(err.message || "AI auto-crop failed. Please try again.", "error");
+    } finally {
+      setIsAiCropping(false);
+    }
+  };
 
   const handleAutoCropSelected = async () => {
     if (selectedScraped.length === 0) return;
@@ -236,26 +341,40 @@ export default function LiveScraperDeck({
         `[Auto Cropper ERROR] Smart trimming operation failed: ${err.message || err}`,
         ...prev
       ]);
+      addNotification(err.message || "Auto-crop failed. Please try again.", "error");
     } finally {
       setIsBatchCropping(false);
     }
   };
 
   return (
-    <div id="scraped_strips_deck" className="bg-neutral-900/60 rounded-2xl border border-neutral-800 p-6 backdrop-blur space-y-4">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-neutral-800 pb-3">
+    <div id="scraped_strips_deck" className="bg-neutral-900/40 rounded-2xl border border-neutral-800/80 p-6 backdrop-blur-md space-y-4 shadow-sm">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-neutral-800/60 pb-3">
         <div className="space-y-0.5">
           <div className="flex items-center gap-2 text-purple-400">
             <ImageIcon className="h-4 w-4" />
-            <span className="text-xs font-semibold tracking-wider uppercase font-mono">Separated Comic Strip Frames</span>
+            <span className="text-[10px] font-semibold tracking-wider uppercase font-mono">Separated Panels</span>
           </div>
           <h3 className="font-bold text-sm text-white">Live Asset Extraction</h3>
         </div>
-        {scrapedImages.length > 0 && (
-          <span className="text-[10px] px-2.5 py-1 font-mono tracking-wider bg-purple-950 text-purple-300 rounded-full border border-purple-800/80">
-            {scrapedImages.length} Individual Images Separated
-          </span>
-        )}
+        <div className="flex items-center gap-3">
+          {scrapedImages.length > 0 && (
+            <span className="text-[9px] px-2.5 py-1 font-mono tracking-wider bg-purple-950/50 text-purple-300 rounded-full border border-purple-800/50 shadow-inner">
+              {scrapedImages.length} Frames
+            </span>
+          )}
+          <button
+            onClick={() => {
+              setScrapedImages([]);
+              setSelectedScraped([]);
+              setConsoleLogs(prev => ["[GUI] Cleared all assets from the deck", ...prev]);
+            }}
+            className="flex items-center gap-1 text-[9px] font-mono text-neutral-500 hover:text-red-400 bg-neutral-900/50 hover:bg-red-950/20 px-2 py-1 rounded-full border border-neutral-800 transition-colors"
+          >
+            <Trash2 className="h-3 w-3" />
+            Clear All
+          </button>
+        </div>
       </div>
 
       {isScraping ? (
@@ -281,39 +400,55 @@ export default function LiveScraperDeck({
             <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={() => {
-                  setSelectedScraped([...scrapedImages]);
-                  setConsoleLogs(prev => ["[GUI] Selected all extracted frames", ...prev]);
+                  if (selectedScraped.length === scrapedImages.length) {
+                    setSelectedScraped([]);
+                    setConsoleLogs(prev => ["[GUI] Cleared selections", ...prev]);
+                  } else {
+                    setSelectedScraped([...scrapedImages]);
+                    setConsoleLogs(prev => ["[GUI] Selected all extracted frames", ...prev]);
+                  }
                 }}
-                className="bg-neutral-900 hover:bg-neutral-800 text-neutral-300 hover:text-white px-2.5 py-1.5 rounded-lg text-xs font-mono border border-neutral-800/60 cursor-pointer flex items-center gap-1.5 transition-colors"
-              >
-                <CheckSquare className="h-3.5 w-3.5 text-purple-400" />
-                <span>Select All</span>
-              </button>
-
-              <button
-                onClick={() => {
-                  setSelectedScraped([]);
-                  setConsoleLogs(prev => ["[GUI] Cleared selections", ...prev]);
-                }}
+                disabled={scrapedImages.length === 0}
                 className="bg-neutral-900 hover:bg-neutral-800 text-neutral-300 hover:text-white px-2.5 py-1.5 rounded-lg text-xs font-mono border border-neutral-800/60 cursor-pointer flex items-center gap-1.5 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                disabled={selectedScraped.length === 0}
               >
-                <Square className="h-3.5 w-3.5 text-neutral-500" />
-                <span>Deselect All</span>
+                {selectedScraped.length === scrapedImages.length && scrapedImages.length > 0 ? (
+                  <>
+                    <Square className="h-3.5 w-3.5 text-neutral-500" />
+                    <span>Deselect All</span>
+                  </>
+                ) : (
+                  <>
+                    <CheckSquare className="h-3.5 w-3.5 text-purple-400" />
+                    <span>Select All</span>
+                  </>
+                )}
               </button>
 
               <div className="flex bg-neutral-900 border border-neutral-800/60 rounded-lg">
                 <button
                   onClick={handleAutoCropSelected}
                   disabled={isBatchCropping || selectedScraped.length === 0}
-                  className="bg-indigo-650 hover:bg-indigo-550 border-r border-indigo-500/30 text-white px-2.5 py-1.5 rounded-l-lg text-xs font-mono cursor-pointer flex items-center gap-1.5 transition-all font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+                  className="bg-indigo-650 hover:bg-indigo-550 border-r border-indigo-500/30 text-white px-3 py-1.5 rounded-l-lg text-xs font-mono cursor-pointer flex items-center gap-1.5 transition-all font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   {isBatchCropping ? (
                     <RefreshCw className="h-3.5 w-3.5 animate-spin" />
                   ) : (
                     <Scissors className="h-3.5 w-3.5 text-indigo-300" />
                   )}
-                  <span>Auto-Crop</span>
+                  <span>{isAiEnabled ? "Smart Crop" : "Auto-Crop"}</span>
+                </button>
+
+                <button
+                  onClick={isAiEnabled ? handleAiCropSelected : handleAutoCropSelected}
+                  disabled={(isAiEnabled ? isAiCropping : isBatchCropping) || selectedScraped.length === 0}
+                  className="bg-purple-800 hover:bg-purple-700 text-white px-2.5 py-1.5 text-xs font-mono cursor-pointer flex items-center gap-1.5 transition-all font-semibold disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                   {isAiEnabled ? (
+                     isAiCropping ? <RefreshCw className="h-3.5 w-3.5 animate-spin"/> : <Brain className="h-3.5 w-3.5 text-purple-200" />
+                   ) : (
+                     <Scissors className="h-3.5 w-3.5 text-purple-200" />
+                   )}
+                   <span>{isAiEnabled ? "Process (AI)" : "Process (Standard)"}</span>
                 </button>
 
                 <button
@@ -379,11 +514,11 @@ export default function LiveScraperDeck({
           </div>
 
           {showAutoCropSettings && (
-            <div id="smart_crop_options_box" className="bg-neutral-950/60 p-4 rounded-xl border border-purple-900/40 grid grid-cols-1 md:grid-cols-4 gap-4 animate-fadeIn">
-              <div className="space-y-1.5">
-                <label className="text-[11px] font-semibold text-neutral-300 uppercase tracking-wide font-mono flex justify-between">
-                  <span>Detection Sensitivity</span>
-                  <span className="text-purple-400 font-bold">{cropSensitivity}%</span>
+            <div id="smart_crop_options_box" className="bg-neutral-950/80 p-5 rounded-2xl border border-purple-900/40 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 animate-fadeIn shadow-2xl">
+              <div className="space-y-2">
+                <label className="text-[11px] font-semibold text-purple-300 uppercase tracking-wider font-mono flex justify-between">
+                  <span>Sensitivity</span>
+                  <span className="text-white font-bold">{cropSensitivity}%</span>
                 </label>
                 <input
                   type="range"
@@ -391,17 +526,14 @@ export default function LiveScraperDeck({
                   max="90"
                   value={cropSensitivity}
                   onChange={(e) => setCropSensitivity(Number(e.target.value))}
-                  className="w-full accent-purple-500 bg-neutral-800 rounded-lg h-1 px-0 cursor-pointer"
+                  className="w-full accent-purple-500 bg-neutral-800 rounded-lg h-1.5 px-0 cursor-pointer hover:accent-purple-400 transition-colors"
                 />
-                <p className="text-[9px] text-neutral-500 leading-normal">
-                  Higher threshold increases edge detection tolerance (clears dust/text overlays better).
-                </p>
               </div>
 
-              <div className="space-y-1.5">
-                <label className="text-[11px] font-semibold text-neutral-300 uppercase tracking-wide font-mono flex justify-between">
-                  <span>Re-padded Margins</span>
-                  <span className="text-purple-400 font-bold">{cropPaddingPx}px</span>
+              <div className="space-y-2">
+                <label className="text-[11px] font-semibold text-purple-300 uppercase tracking-wider font-mono flex justify-between">
+                  <span>Margin Padding</span>
+                  <span className="text-white font-bold">{cropPaddingPx}px</span>
                 </label>
                 <input
                   type="range"
@@ -409,45 +541,62 @@ export default function LiveScraperDeck({
                   max="50"
                   value={cropPaddingPx}
                   onChange={(e) => setCropPaddingPx(Number(e.target.value))}
-                  className="w-full accent-purple-500 bg-neutral-800 rounded-lg h-1 px-0 cursor-pointer"
+                  className="w-full accent-purple-500 bg-neutral-800 rounded-lg h-1.5 px-0 cursor-pointer hover:accent-purple-400 transition-colors"
                 />
-                <p className="text-[9px] text-neutral-500 leading-normal">
-                  Injects uniform blank spacing around cut frames to secure text & captions safety margins.
-                </p>
               </div>
 
-              <div className="space-y-1.5">
-                <label className="text-[11px] font-semibold text-neutral-300 uppercase tracking-wide font-mono block">
-                  Color Filter Mode
+              <div className="space-y-2">
+                <label className="text-[11px] font-semibold text-purple-300 uppercase tracking-wider font-mono block">
+                  Color Filter
                 </label>
                 <select
                   value={cropBackgroundMode}
                   onChange={(e) => setCropBackgroundMode(e.target.value)}
-                  className="w-full bg-neutral-900 border border-neutral-800 text-neutral-200 rounded-lg px-2.5 py-1.5 text-xs font-mono focus:border-purple-600 focus:outline-none"
+                  className="w-full bg-neutral-900 border border-neutral-700 text-neutral-200 rounded-lg px-3 py-2 text-xs font-mono focus:border-purple-600 focus:outline-none hover:border-neutral-500 transition-colors cursor-pointer"
                 >
-                  <option value="auto">Auto Detect BG</option>
-                  <option value="white">Force White BG (#FFF)</option>
-                  <option value="black">Force Black BG (#000)</option>
+                  <option value="auto">Auto-Detect BG</option>
+                  <option value="white">Force White</option>
+                  <option value="black">Force Black</option>
                 </select>
-                <p className="text-[9px] text-neutral-500 leading-normal">
-                  Filters specific spacing backdrops. Keeps alternative designs safe.
-                </p>
+              </div>
+              
+              <div className="space-y-2">
+                <label className="text-[11px] font-semibold text-purple-300 uppercase tracking-wider font-mono block">
+                  Processing Strategy
+                </label>
+                <select
+                  className="w-full bg-neutral-900 border border-neutral-700 text-neutral-200 rounded-lg px-3 py-2 text-xs font-mono focus:border-purple-600 focus:outline-none hover:border-neutral-500 transition-colors cursor-pointer"
+                >
+                  <option value="balanced">Balanced Quality</option>
+                  <option value="precise">High Precision</option>
+                  <option value="fast">High Speed</option>
+                </select>
               </div>
 
-              <div className="space-y-1.5">
-                <label className="text-[11px] font-semibold text-neutral-300 uppercase tracking-wide font-mono block">
-                  Layout Separation
+              <div className="col-span-1 md:col-span-2 lg:col-span-4 border-t border-neutral-800 pt-4 flex gap-4 flex-wrap">
+                <label className="relative flex items-center gap-3 bg-neutral-900/60 border border-neutral-700 rounded-xl px-4 py-3 cursor-pointer hover:bg-neutral-800 transition-all select-none flex-1">
+                  <input
+                    type="checkbox"
+                    checked={isAiEnabled}
+                    onChange={(e) => setIsAiEnabled(e.target.checked)}
+                    className="accent-purple-500 h-4 w-4 rounded"
+                  />
+                  <div className="flex flex-col">
+                    <span className="text-[12px] font-bold text-white">Enable AI Crop</span>
+                    <span className="text-[10px] text-neutral-400">Use generative analysis for complex panels (Quota: 20/day).</span>
+                  </div>
                 </label>
-                <label className="relative flex items-center gap-2 bg-neutral-900/80 border border-neutral-800 rounded-lg p-2 cursor-pointer hover:bg-neutral-850 transition-all select-none col-span-1">
+
+                <label className="relative flex items-center gap-3 bg-neutral-900/60 border border-neutral-700 rounded-xl px-4 py-3 cursor-pointer hover:bg-neutral-800 transition-all select-none flex-1">
                   <input
                     type="checkbox"
                     checked={autoSplitTallStrips}
                     onChange={(e) => setAutoSplitTallStrips(e.target.checked)}
-                    className="accent-purple-500 h-3 w-3 rounded"
+                    className="accent-purple-500 h-4 w-4 rounded"
                   />
                   <div className="flex flex-col">
-                    <span className="text-[11px] font-bold text-neutral-200">Auto-Split Strips</span>
-                    <span className="text-[9px] text-neutral-500">Slice long strips into individual panels.</span>
+                    <span className="text-[12px] font-bold text-white">Auto-Split Strips</span>
+                    <span className="text-[10px] text-neutral-400">Automatically slice long strips into panels.</span>
                   </div>
                 </label>
               </div>
@@ -459,7 +608,7 @@ export default function LiveScraperDeck({
               const isSelected = selectedScraped.includes(imgUrl);
               return (
                 <div 
-                  key={idx}
+                  key={`${imgUrl}-${idx}`}
                   onClick={() => {
                     if (isSelected) {
                       setSelectedScraped(prev => prev.filter(img => img !== imgUrl));
@@ -467,7 +616,7 @@ export default function LiveScraperDeck({
                       setSelectedScraped(prev => [...prev, imgUrl]);
                     }
                   }}
-                  className={`group relative w-[130px] shrink-0 rounded-xl border p-2 space-y-2 transition-all text-center cursor-pointer select-none ${
+                  className={`group relative w-[140px] shrink-0 rounded-xl border p-2 space-y-2 transition-all text-center cursor-pointer select-none ${
                     isSelected 
                       ? "border-purple-500 bg-purple-950/20 shadow-lg shadow-purple-900/40" 
                       : "border-neutral-800 bg-neutral-950 hover:border-purple-500/80"

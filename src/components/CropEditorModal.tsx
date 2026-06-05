@@ -9,7 +9,8 @@ import {
   Trash2, 
   Layers, 
   Move, 
-  Check 
+  Check,
+  Brain
 } from "lucide-react";
 
 interface Slot {
@@ -19,6 +20,8 @@ interface Slot {
   cropRight: number;
   autoTrim: boolean;
 }
+
+import { NotificationType } from "./NotificationStack";
 
 interface CropEditorModalProps {
   editingImageIdx: number | null;
@@ -39,6 +42,7 @@ interface CropEditorModalProps {
   handleSaveEditedImage: () => Promise<void>;
   handleSaveMultipleCuts: (cuts: Slot[]) => Promise<void>;
   setConsoleLogs?: React.Dispatch<React.SetStateAction<string[]>>;
+  addNotification: (message: string, type: NotificationType) => void;
 }
 
 interface Slice {
@@ -66,7 +70,8 @@ export default function CropEditorModal({
   scrapedImages,
   isSavingEdit,
   handleSaveEditedImage,
-  handleSaveMultipleCuts
+  handleSaveMultipleCuts,
+  addNotification
 }: CropEditorModalProps) {
   if (editingImageIdx === null) return null;
 
@@ -86,6 +91,7 @@ export default function CropEditorModal({
     area: number;
   }>>([]);
   const [isDetecting, setIsDetecting] = React.useState<boolean>(false);
+  const [isAiDetecting, setIsAiDetecting] = React.useState<boolean>(false);
 
   // Multiple Cut List
   const [slices, setSlices] = React.useState<Slice[]>([]);
@@ -111,6 +117,47 @@ export default function CropEditorModal({
     }
   }, [editCropTop, editCropBottom, editCropLeft, editCropRight, selectedSliceId]);
 
+  const handleAiCrop = async () => {
+    if (editingImageIdx === null) return;
+    const currentUrl = scrapedImages[editingImageIdx];
+    setIsAiDetecting(true);
+    try {
+      const response = await fetch("/api/ai-detect-panels", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: currentUrl })
+      });
+      if (!response.ok) throw new Error("AI analysis failed");
+      const data = await response.json();
+      if (data.success && Array.isArray(data.panels) && data.panels.length > 0) {
+        // Populate all panels into the slices list instead of just the first one
+        const newSlices = data.panels.map((box: any, index: number) => ({
+          id: `ai-${index}-${Date.now()}`,
+          cropTop: box.cropTop,
+          cropBottom: box.cropBottom,
+          cropLeft: box.cropLeft,
+          cropRight: box.cropRight,
+          autoTrim: editAutoTrim
+        }));
+        
+        setSlices(prev => [...prev, ...newSlices]);
+        
+        // Select the first of the newly added slices
+        const firstNew = newSlices[0];
+        setSelectedSliceId(firstNew.id);
+        setEditCropLeft(firstNew.cropLeft);
+        setEditCropRight(firstNew.cropRight);
+        setEditCropTop(firstNew.cropTop);
+        setEditCropBottom(firstNew.cropBottom);
+      }
+    } catch (err: any) {
+      console.error("AI crop detection failed:", err);
+      addNotification(err.message || "AI crop detection failed. Please try again.", "error");
+    } finally {
+      setIsAiDetecting(false);
+    }
+  };
+
   const handleDetectPanels = async () => {
     if (editingImageIdx === null) return;
     const currentUrl = scrapedImages[editingImageIdx];
@@ -126,7 +173,7 @@ export default function CropEditorModal({
       if (data.success && Array.isArray(data.panels)) {
         setDetectedBoxes(data.panels);
         if (data.panels.length > 0) {
-          const initialSlices = data.panels.map((box, index) => ({
+          const initialSlices = data.panels.map((box: any, index: number) => ({
             id: `detected-${index}-${Date.now()}`,
             cropTop: box.cropTop,
             cropBottom: box.cropBottom,
@@ -145,8 +192,10 @@ export default function CropEditorModal({
           setEditCropBottom(first.cropBottom);
         }
       }
-    } catch (err) {
-      console.error("Detect panels failed:", err);
+    } catch (err: any) {
+      console.error("Detect panels failed, trying AI fallback:", err);
+      addNotification("Panel detection failed, trying AI-based detection...", "info");
+      await handleAiCrop();
     } finally {
       setIsDetecting(false);
     }
@@ -327,6 +376,14 @@ export default function CropEditorModal({
                   </span>
                 </div>
                 <div className="flex gap-1.5">
+                  <button
+                    onClick={handleAiCrop}
+                    disabled={isAiDetecting}
+                    className="flex items-center gap-1.5 bg-purple-900/40 text-purple-200 hover:bg-purple-800/60 px-2 py-0.5 rounded border border-purple-800/45 text-[9px] font-mono font-bold"
+                  >
+                    {isAiDetecting ? <RefreshCw className="h-3 w-3 animate-spin"/> : <Brain className="h-3 w-3" />}
+                    <span>AI Smart Crop</span>
+                  </button>
                   <span className="text-[9px] bg-purple-950 text-purple-300 font-mono font-bold px-2 py-0.5 rounded border border-purple-800/45">
                     Drag empty area to Draw
                   </span>
